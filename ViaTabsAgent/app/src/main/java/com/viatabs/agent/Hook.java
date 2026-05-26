@@ -358,7 +358,7 @@ public class Hook implements IXposedHookLoadPackage {
                 .setPositiveButton("保存", new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
-                        saveCurrentTabsToBookmarks(textOrDefault(input, "ViaTabsAgent"));
+                        saveCurrentTabsToBookmarks(textOrDefault(input, "ViaTabsAgent"), activity);
                         toast(activity, "正在保存到书签");
                     }
                 })
@@ -401,7 +401,8 @@ public class Hook implements IXposedHookLoadPackage {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
                         groupCurrentTabs(null, textOrDefault(name, defaultGroupName()),
-                                textOrDefault(color, "blue"), bookmarks.isChecked(), archived.isChecked(), false);
+                                textOrDefault(color, "blue"), bookmarks.isChecked(), archived.isChecked(), false,
+                                activity);
                         toast(activity, "正在创建分组");
                     }
                 })
@@ -416,7 +417,7 @@ public class Hook implements IXposedHookLoadPackage {
                 toast(activity, "没有可恢复的分组");
                 return;
             }
-            restoreTabGroup(latest.optString("groupId"), null, true, -1, null);
+            restoreTabGroup(latest.optString("groupId"), null, true, -1, null, activity);
             toast(activity, "正在恢复：" + latest.optString("group", "分组"));
         } catch (Throwable t) {
             log("panel restore latest failed: " + t);
@@ -431,8 +432,8 @@ public class Hook implements IXposedHookLoadPackage {
                 toast(activity, "没有可归档的分组");
                 return;
             }
-            updateTabGroupArchive(latest.optString("groupId"), null, true);
-            toast(activity, "已归档：" + latest.optString("group", "分组"));
+            updateTabGroupArchive(latest.optString("groupId"), null, true, activity);
+            toast(activity, "正在归档：" + latest.optString("group", "分组"));
         } catch (Throwable t) {
             log("panel archive latest failed: " + t);
             toast(activity, "归档失败");
@@ -446,8 +447,8 @@ public class Hook implements IXposedHookLoadPackage {
                 toast(activity, "没有可删除的分组");
                 return;
             }
-            deleteTabGroup(latest.optString("groupId"), null);
-            toast(activity, "已删除：" + latest.optString("group", "分组"));
+            deleteTabGroup(latest.optString("groupId"), null, activity);
+            toast(activity, "正在删除：" + latest.optString("group", "分组"));
         } catch (Throwable t) {
             log("panel delete latest failed: " + t);
             toast(activity, "删除失败");
@@ -494,6 +495,18 @@ public class Hook implements IXposedHookLoadPackage {
                 Toast.makeText(context, message, Toast.LENGTH_SHORT).show();
             }
         });
+    }
+
+    private static String shortError(Throwable t) {
+        if (t == null) {
+            return "未知错误";
+        }
+        String message = t.getMessage();
+        if (message == null || message.trim().length() == 0) {
+            message = t.getClass().getSimpleName();
+        }
+        message = message.trim();
+        return message.length() > 48 ? message.substring(0, 48) : message;
     }
 
     private static void installVia700Hooks(ClassLoader classLoader) {
@@ -651,9 +664,14 @@ public class Hook implements IXposedHookLoadPackage {
     }
 
     private static void saveCurrentTabsToBookmarks(final String folderName) {
+        saveCurrentTabsToBookmarks(folderName, null);
+    }
+
+    private static void saveCurrentTabsToBookmarks(final String folderName, final Context uiContext) {
         final Object manager = lastTabManager;
         if (manager == null || mainHandler == null) {
             log("saveCurrentTabsToBookmarks skipped: tab manager not ready");
+            toast(uiContext, "Via 标签管理器未就绪，请先打开一个网页或稍后重试");
             return;
         }
         mainHandler.post(new Runnable() {
@@ -661,6 +679,10 @@ public class Hook implements IXposedHookLoadPackage {
             public void run() {
                 try {
                     final List<TabRecord> tabs = snapshotTabRecords(manager);
+                    if (tabs.size() == 0) {
+                        toast(uiContext, "没有读取到可保存的标签");
+                        return;
+                    }
                     WRITER.execute(new Runnable() {
                         @Override
                         public void run() {
@@ -669,13 +691,16 @@ public class Hook implements IXposedHookLoadPackage {
                                 writeBookmarkSaveSnapshot(folderName, tabs, result);
                                 log("saved tabs to bookmarks: folder=" + folderName + " tabs=" + tabs.size()
                                         + " inserted=" + result.inserted + " skipped=" + result.skipped);
+                                toast(uiContext, "已保存 " + result.inserted + " 个标签，跳过 " + result.skipped + " 个");
                             } catch (Throwable t) {
                                 log("saveCurrentTabsToBookmarks background failed: " + t);
+                                toast(uiContext, "保存失败：" + shortError(t));
                             }
                         }
                     });
                 } catch (Throwable t) {
                     log("saveCurrentTabsToBookmarks failed: " + t);
+                    toast(uiContext, "保存失败：" + shortError(t));
                 }
             }
         });
@@ -684,9 +709,16 @@ public class Hook implements IXposedHookLoadPackage {
     private static void groupCurrentTabs(final String groupId, final String groupName, final String color,
                                          final boolean saveBookmarks, final boolean archived,
                                          final boolean closeTabs) {
+        groupCurrentTabs(groupId, groupName, color, saveBookmarks, archived, closeTabs, null);
+    }
+
+    private static void groupCurrentTabs(final String groupId, final String groupName, final String color,
+                                         final boolean saveBookmarks, final boolean archived,
+                                         final boolean closeTabs, final Context uiContext) {
         final Object manager = lastTabManager;
         if (manager == null || mainHandler == null) {
             log("groupCurrentTabs skipped: tab manager not ready");
+            toast(uiContext, "Via 标签管理器未就绪，请先打开一个网页或稍后重试");
             return;
         }
         mainHandler.post(new Runnable() {
@@ -697,6 +729,10 @@ public class Hook implements IXposedHookLoadPackage {
                         : groupName.trim();
                 try {
                     final List<TabRecord> tabs = snapshotTabRecords(manager);
+                    if (tabs.size() == 0) {
+                        toast(uiContext, "没有读取到可分组的标签");
+                        return;
+                    }
                     WRITER.execute(new Runnable() {
                         @Override
                         public void run() {
@@ -706,13 +742,16 @@ public class Hook implements IXposedHookLoadPackage {
                                 log("grouped tabs: group=" + safeGroup + " tabs=" + tabs.size()
                                         + " bookmarks=" + saveBookmarks + " inserted=" + result.inserted
                                         + " archived=" + archived + " closeRequested=" + closeTabs);
+                                toast(uiContext, "已创建分组：" + safeGroup + "（" + tabs.size() + " 个标签）");
                             } catch (Throwable t) {
                                 log("groupCurrentTabs background failed: " + t);
+                                toast(uiContext, "创建分组失败：" + shortError(t));
                             }
                         }
                     });
                 } catch (Throwable t) {
                     log("groupCurrentTabs failed: " + t);
+                    toast(uiContext, "创建分组失败：" + shortError(t));
                 }
             }
         });
@@ -957,9 +996,15 @@ public class Hook implements IXposedHookLoadPackage {
 
     private static void restoreTabGroup(final String groupId, final String groupName, final boolean dedupe,
                                         final int targetIndex, final String targetUrl) {
+        restoreTabGroup(groupId, groupName, dedupe, targetIndex, targetUrl, null);
+    }
+
+    private static void restoreTabGroup(final String groupId, final String groupName, final boolean dedupe,
+                                        final int targetIndex, final String targetUrl, final Context uiContext) {
         final Object manager = lastTabManager;
         if (manager == null || mainHandler == null) {
             log("restoreTabGroup skipped: tab manager not ready");
+            toast(uiContext, "Via 标签管理器未就绪，请先打开一个网页或稍后重试");
             return;
         }
         mainHandler.post(new Runnable() {
@@ -969,11 +1014,13 @@ public class Hook implements IXposedHookLoadPackage {
                     JSONObject group = findTabGroup(groupId, groupName);
                     if (group == null) {
                         log("restoreTabGroup skipped: group not found");
+                        toast(uiContext, "没有找到可恢复的分组");
                         return;
                     }
                     JSONArray tabs = group.optJSONArray("tabs");
                     if (tabs == null || tabs.length() == 0) {
                         log("restoreTabGroup skipped: group has no tabs");
+                        toast(uiContext, "该分组没有可恢复的标签");
                         return;
                     }
                     Object rawCurrent = XposedHelpers.callMethod(manager, "C");
@@ -1004,14 +1051,21 @@ public class Hook implements IXposedHookLoadPackage {
                     log("restored tab group: groupId=" + group.optString("groupId") + " group="
                             + group.optString("group") + " opened=" + opened + " dedupe=" + dedupe
                             + " index=" + targetIndex);
+                    toast(uiContext, opened > 0 ? "已恢复 " + opened + " 个标签" : "没有需要恢复的新标签");
                 } catch (Throwable t) {
                     log("restoreTabGroup failed: " + t);
+                    toast(uiContext, "恢复失败：" + shortError(t));
                 }
             }
         });
     }
 
     private static void updateTabGroupArchive(final String groupId, final String groupName, final boolean archived) {
+        updateTabGroupArchive(groupId, groupName, archived, null);
+    }
+
+    private static void updateTabGroupArchive(final String groupId, final String groupName, final boolean archived,
+                                              final Context uiContext) {
         WRITER.execute(new Runnable() {
             @Override
             public void run() {
@@ -1031,14 +1085,20 @@ public class Hook implements IXposedHookLoadPackage {
                         writeTabGroups(file, groups);
                     }
                     log("archive tab group: changed=" + changed + " archived=" + archived);
+                    toast(uiContext, changed ? (archived ? "已归档分组" : "已取消归档分组") : "没有找到可归档的分组");
                 } catch (Throwable t) {
                     log("archive tab group failed: " + t);
+                    toast(uiContext, "归档失败：" + shortError(t));
                 }
             }
         });
     }
 
     private static void deleteTabGroup(final String groupId, final String groupName) {
+        deleteTabGroup(groupId, groupName, null);
+    }
+
+    private static void deleteTabGroup(final String groupId, final String groupName, final Context uiContext) {
         WRITER.execute(new Runnable() {
             @Override
             public void run() {
@@ -1059,8 +1119,10 @@ public class Hook implements IXposedHookLoadPackage {
                         writeTabGroups(file, kept);
                     }
                     log("delete tab group: deleted=" + deleted);
+                    toast(uiContext, deleted ? "已删除分组" : "没有找到可删除的分组");
                 } catch (Throwable t) {
                     log("delete tab group failed: " + t);
+                    toast(uiContext, "删除失败：" + shortError(t));
                 }
             }
         });

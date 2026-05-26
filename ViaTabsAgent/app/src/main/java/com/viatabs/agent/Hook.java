@@ -22,6 +22,7 @@ import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.webkit.WebView;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -35,9 +36,12 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Enumeration;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -47,6 +51,7 @@ import java.util.WeakHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import dalvik.system.DexFile;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -64,11 +69,18 @@ public class Hook implements IXposedHookLoadPackage {
     private static volatile Object lastTabManager;
     private static volatile Handler mainHandler;
     private static volatile boolean restoringAgentSession;
+    private static volatile boolean dynamicScanStarted;
+    private static volatile Method tabListMethod;
+    private static volatile Method openUrlMethod;
+    private static volatile Method switchTabMethod;
+    private static volatile Method sessionBundleMethod;
     private static final WeakHashMap<Activity, View> PANEL_BUTTONS = new WeakHashMap<Activity, View>();
     private static final ExecutorService WRITER = Executors.newSingleThreadExecutor();
     private static final ThreadLocal<Boolean> IN_MANAGER_SNAPSHOT = new ThreadLocal<Boolean>();
+    private static final ThreadLocal<Boolean> IN_WEBVIEW_CAPTURE = new ThreadLocal<Boolean>();
     private static final Map<String, String> LAST_PAYLOAD = new HashMap<String, String>();
     private static final Map<String, Long> LAST_WRITE_AT = new HashMap<String, Long>();
+    private static final Map<String, String> WEBVIEW_TITLES = new HashMap<String, String>();
     private static final long MIN_WRITE_INTERVAL_MS = 1000L;
     private static final String ACTION_OPEN_TEST_TABS = "com.viatabs.agent.OPEN_TEST_TABS";
     private static final String ACTION_DUMP_TABS = "com.viatabs.agent.DUMP_TABS";
@@ -101,6 +113,7 @@ public class Hook implements IXposedHookLoadPackage {
                 ClassLoader classLoader = appContext.getClassLoader();
                 captureTabManagerConstructors(classLoader);
                 installVia700Hooks(classLoader);
+                startDynamicTabManagerScan(classLoader);
                 installWebViewFallback(classLoader);
                 installViaPanelHook();
                 registerDebugReceiver();
@@ -128,6 +141,7 @@ public class Hook implements IXposedHookLoadPackage {
     private static void captureTabManagerConstructors(ClassLoader classLoader) {
         try {
             Class<?> managerClass = XposedHelpers.findClass("e.h.a.e.c", classLoader);
+            cacheLegacyTabMethods(managerClass);
             XposedBridge.hookAllConstructors(managerClass, new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
@@ -139,6 +153,29 @@ public class Hook implements IXposedHookLoadPackage {
             log("hooked e.h.a.e.c constructors");
         } catch (Throwable t) {
             log("failed to hook e.h.a.e.c constructors: " + t);
+        }
+    }
+
+    private static void cacheLegacyTabMethods(Class<?> managerClass) {
+        try {
+            tabListMethod = managerClass.getDeclaredMethod("C");
+            tabListMethod.setAccessible(true);
+        } catch (Throwable ignored) {
+        }
+        try {
+            sessionBundleMethod = managerClass.getDeclaredMethod("d");
+            sessionBundleMethod.setAccessible(true);
+        } catch (Throwable ignored) {
+        }
+        try {
+            openUrlMethod = managerClass.getDeclaredMethod("K", String.class, int.class);
+            openUrlMethod.setAccessible(true);
+        } catch (Throwable ignored) {
+        }
+        try {
+            switchTabMethod = managerClass.getDeclaredMethod("V", int.class);
+            switchTabMethod.setAccessible(true);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -237,7 +274,8 @@ public class Hook implements IXposedHookLoadPackage {
 
     private static void openTestTabs(final int count, final String prefix) {
         final Object manager = lastTabManager;
-        if (manager == null || mainHandler == null) {
+        final Method opener = openUrlMethod;
+        if (manager == null || opener == null || mainHandler == null) {
             log("openTestTabs skipped: tab manager not ready");
             return;
         }
@@ -249,7 +287,7 @@ public class Hook implements IXposedHookLoadPackage {
                 public void run() {
                     try {
                         String url = prefix + index;
-                        XposedHelpers.callMethod(manager, "K", url, 0);
+                        opener.invoke(manager, url, 0);
                         log("opened test tab " + index + ": " + url);
                         snapshotFromLastTabManager("broadcast.openTestTabs");
                     } catch (Throwable t) {
@@ -262,7 +300,8 @@ public class Hook implements IXposedHookLoadPackage {
 
     private static void switchTab(final int index) {
         final Object manager = lastTabManager;
-        if (manager == null || mainHandler == null) {
+        final Method switcher = switchTabMethod;
+        if (manager == null || switcher == null || mainHandler == null) {
             log("switchTab skipped: tab manager not ready");
             return;
         }
@@ -270,7 +309,7 @@ public class Hook implements IXposedHookLoadPackage {
             @Override
             public void run() {
                 try {
-                    XposedHelpers.callMethod(manager, "V", Math.max(0, index));
+                    switcher.invoke(manager, Math.max(0, index));
                     log("switched tab to " + index);
                     snapshotFromLastTabManager("broadcast.switchTab");
                 } catch (Throwable t) {
@@ -519,6 +558,10 @@ public class Hook implements IXposedHookLoadPackage {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     lastTabManager = param.thisObject;
+                    if (param.method instanceof Method) {
+                        tabListMethod = (Method) param.method;
+                        tabListMethod.setAccessible(true);
+                    }
                     if (Boolean.TRUE.equals(IN_MANAGER_SNAPSHOT.get())) {
                         return;
                     }
@@ -538,6 +581,10 @@ public class Hook implements IXposedHookLoadPackage {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     lastTabManager = param.thisObject;
+                    if (param.method instanceof Method) {
+                        sessionBundleMethod = (Method) param.method;
+                        sessionBundleMethod.setAccessible(true);
+                    }
                     Object result = param.getResult();
                     if (result instanceof Bundle) {
                         expandBundleToFullTabList(param.thisObject, (Bundle) result);
@@ -563,6 +610,17 @@ public class Hook implements IXposedHookLoadPackage {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     lastTabManager = param.thisObject;
+                    if (param.method instanceof Method) {
+                        Method method = (Method) param.method;
+                        method.setAccessible(true);
+                        if ("K".equals(method.getName())) {
+                            openUrlMethod = method;
+                        } else if ("V".equals(method.getName())) {
+                            switchTabMethod = method;
+                        } else if ("U".equals(method.getName())) {
+                            sessionBundleMethod = method;
+                        }
+                    }
                     snapshotFromLastTabManager(param.method.getName());
                     if ("U".equals(param.method.getName())) {
                         scheduleAgentSessionRestore("after.U", 1200L);
@@ -576,7 +634,306 @@ public class Hook implements IXposedHookLoadPackage {
         }
     }
 
+    private static void startDynamicTabManagerScan(final ClassLoader classLoader) {
+        if (dynamicScanStarted || appContext == null) {
+            return;
+        }
+        dynamicScanStarted = true;
+        WRITER.execute(new Runnable() {
+            @Override
+            public void run() {
+                int scanned = 0;
+                int hooked = 0;
+                DexFile dex = null;
+                try {
+                    dex = new DexFile(appContext.getPackageCodePath());
+                    Enumeration<String> entries = dex.entries();
+                    while (entries.hasMoreElements() && hooked < 3) {
+                        String name = entries.nextElement();
+                        if (!shouldScanViaClass(name)) {
+                            continue;
+                        }
+                        scanned++;
+                        Class<?> clazz;
+                        try {
+                            clazz = Class.forName(name, false, classLoader);
+                        } catch (Throwable ignored) {
+                            continue;
+                        }
+                        TabManagerCandidate candidate = findTabManagerCandidate(clazz);
+                        if (candidate == null) {
+                            continue;
+                        }
+                        if (hookDynamicTabManager(candidate)) {
+                            hooked++;
+                        }
+                    }
+                    log("dynamic tab manager scan finished: scanned=" + scanned + " hooked=" + hooked);
+                } catch (Throwable t) {
+                    log("dynamic tab manager scan failed: " + t);
+                } finally {
+                    if (dex != null) {
+                        try {
+                            dex.close();
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    private static boolean shouldScanViaClass(String name) {
+        if (name == null || name.length() == 0) {
+            return false;
+        }
+        return !name.startsWith("android.")
+                && !name.startsWith("androidx.")
+                && !name.startsWith("kotlin.")
+                && !name.startsWith("kotlinx.")
+                && !name.startsWith("okhttp3.")
+                && !name.startsWith("okio.")
+                && !name.startsWith("org.")
+                && !name.startsWith("com.viatabs.");
+    }
+
+    private static TabManagerCandidate findTabManagerCandidate(Class<?> clazz) {
+        try {
+            if (clazz == null || clazz.isInterface() || Modifier.isAbstract(clazz.getModifiers())) {
+                return null;
+            }
+            Method list = null;
+            Method opener = null;
+            Method switcher = null;
+            Method bundle = null;
+            Method[] methods = clazz.getDeclaredMethods();
+            for (Method method : methods) {
+                if (Modifier.isStatic(method.getModifiers())) {
+                    continue;
+                }
+                Class<?>[] params = method.getParameterTypes();
+                Class<?> returns = method.getReturnType();
+                if (params.length == 0 && List.class.isAssignableFrom(returns)) {
+                    list = method;
+                } else if (params.length == 0 && Bundle.class.isAssignableFrom(returns)) {
+                    bundle = method;
+                } else if (params.length == 2 && params[0] == String.class && params[1] == int.class) {
+                    opener = method;
+                } else if (params.length == 1 && params[0] == int.class) {
+                    switcher = method;
+                }
+            }
+            if (list != null && (opener != null || bundle != null || switcher != null)) {
+                list.setAccessible(true);
+                if (opener != null) {
+                    opener.setAccessible(true);
+                }
+                if (switcher != null) {
+                    switcher.setAccessible(true);
+                }
+                if (bundle != null) {
+                    bundle.setAccessible(true);
+                }
+                return new TabManagerCandidate(clazz, list, opener, switcher, bundle);
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private static boolean hookDynamicTabManager(final TabManagerCandidate candidate) {
+        try {
+            XposedBridge.hookAllConstructors(candidate.clazz, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    rememberTabManager(candidate, param.thisObject, "dynamic.constructor");
+                }
+            });
+            XposedBridge.hookMethod(candidate.listMethod, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    rememberTabManager(candidate, param.thisObject, "dynamic." + candidate.listMethod.getName());
+                    Object result = param.getResult();
+                    if (result instanceof List) {
+                        writeTabsSnapshot("tabManager.dynamic." + candidate.listMethod.getName(), (List<?>) result, null);
+                    }
+                }
+            });
+            if (candidate.bundleMethod != null) {
+                XposedBridge.hookMethod(candidate.bundleMethod, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        rememberTabManager(candidate, param.thisObject, "dynamic." + candidate.bundleMethod.getName());
+                        Object result = param.getResult();
+                        if (result instanceof Bundle) {
+                            writeBundleSnapshot("tabManager.dynamic." + candidate.bundleMethod.getName(), (Bundle) result);
+                        }
+                    }
+                });
+            }
+            if (candidate.openMethod != null) {
+                XposedBridge.hookMethod(candidate.openMethod, dynamicMutationHook(candidate, candidate.openMethod));
+            }
+            if (candidate.switchMethod != null) {
+                XposedBridge.hookMethod(candidate.switchMethod, dynamicMutationHook(candidate, candidate.switchMethod));
+            }
+            log("hooked dynamic tab manager: " + candidate.clazz.getName()
+                    + " list=" + candidate.listMethod.getName()
+                    + " open=" + (candidate.openMethod == null ? "null" : candidate.openMethod.getName())
+                    + " switch=" + (candidate.switchMethod == null ? "null" : candidate.switchMethod.getName())
+                    + " bundle=" + (candidate.bundleMethod == null ? "null" : candidate.bundleMethod.getName()));
+            return true;
+        } catch (Throwable t) {
+            log("hook dynamic tab manager failed: " + candidate.clazz.getName() + " error=" + t);
+            return false;
+        }
+    }
+
+    private static XC_MethodHook dynamicMutationHook(final TabManagerCandidate candidate, final Method method) {
+        return new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                rememberTabManager(candidate, param.thisObject, "dynamic." + method.getName());
+                snapshotFromLastTabManager("dynamic." + method.getName());
+            }
+        };
+    }
+
+    private static void rememberTabManager(TabManagerCandidate candidate, Object manager, String reason) {
+        if (candidate == null || manager == null) {
+            return;
+        }
+        lastTabManager = manager;
+        tabListMethod = candidate.listMethod;
+        if (candidate.openMethod != null) {
+            openUrlMethod = candidate.openMethod;
+        }
+        if (candidate.switchMethod != null) {
+            switchTabMethod = candidate.switchMethod;
+        }
+        if (candidate.bundleMethod != null) {
+            sessionBundleMethod = candidate.bundleMethod;
+        }
+        log("captured tab manager: " + candidate.clazz.getName() + " reason=" + reason);
+    }
+
+    private static Object callTabListMethod(Object manager) throws Exception {
+        Method method = tabListMethod;
+        if (method != null && method.getDeclaringClass().isInstance(manager)) {
+            method.setAccessible(true);
+            return method.invoke(manager);
+        }
+        Method[] methods = manager.getClass().getDeclaredMethods();
+        for (Method candidate : methods) {
+            if (Modifier.isStatic(candidate.getModifiers())
+                    || candidate.getParameterTypes().length != 0
+                    || !List.class.isAssignableFrom(candidate.getReturnType())) {
+                continue;
+            }
+            candidate.setAccessible(true);
+            Object result = candidate.invoke(manager);
+            if (looksLikeUrlList(result)) {
+                tabListMethod = candidate;
+                return result;
+            }
+        }
+        return null;
+    }
+
+    private static void callOpenUrlMethod(Object manager, String url) throws Exception {
+        Method method = openUrlMethod;
+        if (method != null && method.getDeclaringClass().isInstance(manager)) {
+            method.setAccessible(true);
+            method.invoke(manager, url, 0);
+            return;
+        }
+        Method[] methods = manager.getClass().getDeclaredMethods();
+        for (Method candidate : methods) {
+            Class<?>[] params = candidate.getParameterTypes();
+            if (Modifier.isStatic(candidate.getModifiers())
+                    || params.length != 2
+                    || params[0] != String.class
+                    || params[1] != int.class) {
+                continue;
+            }
+            candidate.setAccessible(true);
+            openUrlMethod = candidate;
+            candidate.invoke(manager, url, 0);
+            return;
+        }
+        throw new IllegalStateException("open tab method not ready");
+    }
+
+    private static boolean looksLikeUrlList(Object value) {
+        if (!(value instanceof List)) {
+            return false;
+        }
+        List<?> list = (List<?>) value;
+        if (list.isEmpty()) {
+            return true;
+        }
+        int checked = Math.min(list.size(), 5);
+        for (int i = 0; i < checked; i++) {
+            Object item = list.get(i);
+            if (item == null) {
+                continue;
+            }
+            if (isMeaningfulUrl(String.valueOf(item))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static void installWebViewFallback(ClassLoader classLoader) {
+        try {
+            XposedBridge.hookAllMethods(WebView.class, "getUrl", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (Boolean.TRUE.equals(IN_WEBVIEW_CAPTURE.get())) {
+                        return;
+                    }
+                    Object result = param.getResult();
+                    if (result instanceof String) {
+                        WebView webView = param.thisObject instanceof WebView ? (WebView) param.thisObject : null;
+                        String title = safeWebViewTitle(webView);
+                        rememberWebView((String) result, title);
+                        writeSingleUrlSnapshot("androidWebView.getUrl", (String) result, title);
+                    }
+                }
+            });
+            XposedBridge.hookAllMethods(WebView.class, "getTitle", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (Boolean.TRUE.equals(IN_WEBVIEW_CAPTURE.get())) {
+                        return;
+                    }
+                    Object result = param.getResult();
+                    if (result instanceof String && param.thisObject instanceof WebView) {
+                        WebView webView = (WebView) param.thisObject;
+                        rememberWebView(safeWebViewUrl(webView), (String) result);
+                    }
+                }
+            });
+            XposedBridge.hookAllMethods(WebView.class, "loadUrl", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    if (Boolean.TRUE.equals(IN_WEBVIEW_CAPTURE.get())) {
+                        return;
+                    }
+                    if (param.args != null && param.args.length > 0 && param.args[0] instanceof String) {
+                        WebView webView = param.thisObject instanceof WebView ? (WebView) param.thisObject : null;
+                        String url = (String) param.args[0];
+                        String title = safeWebViewTitle(webView);
+                        rememberWebView(url, title);
+                        writeSingleUrlSnapshot("androidWebView.loadUrl", url, title);
+                    }
+                }
+            });
+            log("hooked android.webkit.WebView fallback");
+        } catch (Throwable t) {
+            log("failed to hook android.webkit.WebView fallback: " + t);
+        }
         try {
             XposedHelpers.findAndHookMethod("e.h.a.g.a", classLoader, "getUrl", new XC_MethodHook() {
                 @Override
@@ -587,7 +944,7 @@ public class Hook implements IXposedHookLoadPackage {
                     Object result = param.getResult();
                     if (result instanceof String) {
                         snapshotFromLastTabManager("viaWebView.getUrl");
-                        writeSingleUrlSnapshot("viaWebView.getUrl", (String) result);
+                        writeSingleUrlSnapshot("viaWebView.getUrl", (String) result, null);
                     }
                 }
             });
@@ -636,17 +993,140 @@ public class Hook implements IXposedHookLoadPackage {
     }
 
     private static void writeSingleUrlSnapshot(String source, String url) {
+        writeSingleUrlSnapshot(source, url, null);
+    }
+
+    private static void writeSingleUrlSnapshot(String source, String url, String title) {
         try {
+            if (!isMeaningfulUrl(url)) {
+                return;
+            }
             JSONObject root = baseSnapshot(source);
             JSONArray tabs = new JSONArray();
             JSONObject tab = new JSONObject();
             tab.put("url", url);
+            if (title != null && title.trim().length() > 0) {
+                tab.put("title", title.trim());
+            }
             tabs.put(tab);
             root.put("tabs", tabs);
             writeJson(root);
         } catch (Throwable t) {
             log("write single url snapshot failed: " + t);
         }
+    }
+
+    private static void writeTabRecordsSnapshot(String source, List<TabRecord> records) {
+        try {
+            if (records == null || records.isEmpty()) {
+                return;
+            }
+            JSONObject root = baseSnapshot(source);
+            root.put("tabs", toTabRecordArray(records));
+            writeJson(root);
+        } catch (Throwable t) {
+            log("write tab records snapshot failed: " + t);
+        }
+    }
+
+    private static List<TabRecord> collectWebViewTabRecords(Activity activity) {
+        ArrayList<TabRecord> records = new ArrayList<TabRecord>();
+        LinkedHashSet<String> seen = new LinkedHashSet<String>();
+        try {
+            View root = activity == null ? null : activity.findViewById(android.R.id.content);
+            collectWebViewsFromView(root, records, seen);
+            synchronized (WEBVIEW_TITLES) {
+                for (Map.Entry<String, String> entry : WEBVIEW_TITLES.entrySet()) {
+                    String url = entry.getKey();
+                    if (!isMeaningfulUrl(url) || !seen.add(url)) {
+                        continue;
+                    }
+                    String title = entry.getValue();
+                    if (title == null || title.trim().length() == 0) {
+                        title = titleFromUrl(url);
+                    }
+                    records.add(new TabRecord(records.size(), title, url));
+                }
+            }
+        } catch (Throwable t) {
+            log("collect WebView tabs failed: " + t);
+        }
+        log("collected visible WebView tabs: " + records.size());
+        return records;
+    }
+
+    private static void collectWebViewsFromView(View view, List<TabRecord> records, Set<String> seen) {
+        if (view == null) {
+            return;
+        }
+        if (view instanceof WebView) {
+            WebView webView = (WebView) view;
+            String url = safeWebViewUrl(webView);
+            String title = safeWebViewTitle(webView);
+            rememberWebView(url, title);
+            if (isMeaningfulUrl(url) && seen.add(url)) {
+                if (title == null || title.trim().length() == 0) {
+                    title = titleFromUrl(url);
+                }
+                records.add(new TabRecord(records.size(), title, url));
+            }
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                collectWebViewsFromView(group.getChildAt(i), records, seen);
+            }
+        }
+    }
+
+    private static String safeWebViewUrl(WebView webView) {
+        try {
+            if (webView == null) {
+                return null;
+            }
+            IN_WEBVIEW_CAPTURE.set(Boolean.TRUE);
+            return webView.getUrl();
+        } catch (Throwable ignored) {
+            return null;
+        } finally {
+            IN_WEBVIEW_CAPTURE.remove();
+        }
+    }
+
+    private static String safeWebViewTitle(WebView webView) {
+        try {
+            if (webView == null) {
+                return null;
+            }
+            IN_WEBVIEW_CAPTURE.set(Boolean.TRUE);
+            return webView.getTitle();
+        } catch (Throwable ignored) {
+            return null;
+        } finally {
+            IN_WEBVIEW_CAPTURE.remove();
+        }
+    }
+
+    private static void rememberWebView(String url, String title) {
+        if (!isMeaningfulUrl(url)) {
+            return;
+        }
+        String safeTitle = title == null || title.trim().length() == 0 ? titleFromUrl(url) : title.trim();
+        synchronized (WEBVIEW_TITLES) {
+            WEBVIEW_TITLES.put(url.trim(), safeTitle);
+        }
+    }
+
+    private static boolean isMeaningfulUrl(String url) {
+        if (url == null) {
+            return false;
+        }
+        String safe = url.trim();
+        if (safe.length() == 0 || "null".equalsIgnoreCase(safe)) {
+            return false;
+        }
+        return safe.startsWith("http://") || safe.startsWith("https://")
+                || safe.startsWith("file://") || safe.startsWith("content://");
     }
 
     private static void snapshotFromLastTabManager(String reason) {
@@ -656,7 +1136,7 @@ public class Hook implements IXposedHookLoadPackage {
         }
         try {
             IN_MANAGER_SNAPSHOT.set(Boolean.TRUE);
-            Object urls = XposedHelpers.callMethod(manager, "C");
+            Object urls = callTabListMethod(manager);
             if (urls instanceof List) {
                 writeTabsSnapshot("tabManager.cachedAfter." + reason, (List<?>) urls, null);
             }
@@ -675,8 +1155,19 @@ public class Hook implements IXposedHookLoadPackage {
         log("saveCurrentTabsToBookmarks requested: folder=" + folderName);
         final Object manager = lastTabManager;
         final Handler handler = mainHandler;
+        final List<TabRecord> visibleWebViews = uiContext instanceof Activity
+                ? collectWebViewTabRecords((Activity) uiContext)
+                : new ArrayList<TabRecord>();
+        if (visibleWebViews.size() > 0) {
+            writeTabRecordsSnapshot("webView.activity.save", visibleWebViews);
+        }
         if (manager == null || handler == null) {
-            log("saveCurrentTabsToBookmarks fallback: tab manager not ready");
+            if (visibleWebViews.size() > 0) {
+                log("saveCurrentTabsToBookmarks using visible WebView snapshot: tabs=" + visibleWebViews.size());
+                saveAndExportTabs(folderName, visibleWebViews, uiContext, "webview.activity");
+                return;
+            }
+            log("saveCurrentTabsToBookmarks fallback: tab manager not ready and no visible WebView");
             exportCachedTabsToBookmarks(folderName, uiContext, "managerNotReady");
             return;
         }
@@ -806,7 +1297,12 @@ public class Hook implements IXposedHookLoadPackage {
 
     private static List<TabRecord> snapshotTabRecords(Object manager) {
         ArrayList<TabRecord> records = new ArrayList<TabRecord>();
-        Object urls = XposedHelpers.callMethod(manager, "C");
+        Object urls = null;
+        try {
+            urls = callTabListMethod(manager);
+        } catch (Throwable t) {
+            log("snapshot tab records failed to read list: " + t);
+        }
         List<String> cleanUrls = urls instanceof List ? normalizeUrls((List<?>) urls) : new ArrayList<String>();
         Object rawTabs = null;
         try {
@@ -1124,7 +1620,7 @@ public class Hook implements IXposedHookLoadPackage {
                         toast(uiContext, "该分组没有可恢复的标签");
                         return;
                     }
-                    Object rawCurrent = XposedHelpers.callMethod(manager, "C");
+                    Object rawCurrent = callTabListMethod(manager);
                     Set<String> current = new LinkedHashSet<String>(rawCurrent instanceof List
                             ? normalizeUrls((List<?>) rawCurrent)
                             : new ArrayList<String>());
@@ -1144,7 +1640,7 @@ public class Hook implements IXposedHookLoadPackage {
                         if (dedupe && current.contains(url)) {
                             continue;
                         }
-                        XposedHelpers.callMethod(manager, "K", url, 0);
+                        callOpenUrlMethod(manager, url);
                         current.add(url);
                         opened++;
                     }
@@ -1476,7 +1972,7 @@ public class Hook implements IXposedHookLoadPackage {
             public void run() {
                 try {
                     restoringAgentSession = true;
-                    Object rawCurrent = XposedHelpers.callMethod(manager, "C");
+                    Object rawCurrent = callTabListMethod(manager);
                     List<String> current = rawCurrent instanceof List ? normalizeUrls((List<?>) rawCurrent) : new ArrayList<String>();
                     Set<String> currentSet = new LinkedHashSet<String>(current);
                     int opened = 0;
@@ -1484,7 +1980,7 @@ public class Hook implements IXposedHookLoadPackage {
                         if (currentSet.contains(url)) {
                             continue;
                         }
-                        XposedHelpers.callMethod(manager, "K", url, 0);
+                        callOpenUrlMethod(manager, url);
                         currentSet.add(url);
                         opened++;
                     }
@@ -1733,6 +2229,23 @@ public class Hook implements IXposedHookLoadPackage {
             this.index = index;
             this.title = title;
             this.url = url;
+        }
+    }
+
+    private static final class TabManagerCandidate {
+        final Class<?> clazz;
+        final Method listMethod;
+        final Method openMethod;
+        final Method switchMethod;
+        final Method bundleMethod;
+
+        TabManagerCandidate(Class<?> clazz, Method listMethod, Method openMethod,
+                            Method switchMethod, Method bundleMethod) {
+            this.clazz = clazz;
+            this.listMethod = listMethod;
+            this.openMethod = openMethod;
+            this.switchMethod = switchMethod;
+            this.bundleMethod = bundleMethod;
         }
     }
 

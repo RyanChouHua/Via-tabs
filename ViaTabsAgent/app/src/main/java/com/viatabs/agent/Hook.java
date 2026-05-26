@@ -674,44 +674,83 @@ public class Hook implements IXposedHookLoadPackage {
     private static void saveCurrentTabsToBookmarks(final String folderName, final Context uiContext) {
         log("saveCurrentTabsToBookmarks requested: folder=" + folderName);
         final Object manager = lastTabManager;
-        if (manager == null || mainHandler == null) {
-            log("saveCurrentTabsToBookmarks skipped: tab manager not ready");
-            toast(uiContext, "Via 标签管理器未就绪，请先打开一个网页或稍后重试");
+        final Handler handler = mainHandler;
+        if (manager == null || handler == null) {
+            log("saveCurrentTabsToBookmarks fallback: tab manager not ready");
+            exportCachedTabsToBookmarks(folderName, uiContext, "managerNotReady");
             return;
         }
-        mainHandler.post(new Runnable() {
+        handler.post(new Runnable() {
             @Override
             public void run() {
                 try {
                     final List<TabRecord> tabs = snapshotTabRecords(manager);
                     if (tabs.size() == 0) {
-                        log("saveCurrentTabsToBookmarks skipped: empty tab list");
-                        toast(uiContext, "没有读取到可保存的标签");
+                        log("saveCurrentTabsToBookmarks fallback: live tab list empty");
+                        exportCachedTabsToBookmarks(folderName, uiContext, "emptyLiveSnapshot");
                         return;
                     }
                     log("saveCurrentTabsToBookmarks snapshot: tabs=" + tabs.size());
-                    WRITER.execute(new Runnable() {
-                        @Override
-                        public void run() {
-                            try {
-                                BookmarkSaveResult result = saveTabsToViaBookmarks(folderName, tabs);
-                                String exportPath = writeBookmarkSaveSnapshot(folderName, tabs, result);
-                                log("saved tabs to bookmarks: folder=" + folderName + " tabs=" + tabs.size()
-                                        + " inserted=" + result.inserted + " skipped=" + result.skipped
-                                        + " export=" + exportPath);
-                                toast(uiContext, "已保存 " + result.inserted + " 个标签，已导出到 Download/ViaTabsAgent");
-                            } catch (Throwable t) {
-                                log("saveCurrentTabsToBookmarks background failed: " + t);
-                                toast(uiContext, "保存失败：" + shortError(t));
-                            }
-                        }
-                    });
+                    saveAndExportTabs(folderName, tabs, uiContext, "live");
                 } catch (Throwable t) {
-                    log("saveCurrentTabsToBookmarks failed: " + t);
-                    toast(uiContext, "保存失败：" + shortError(t));
+                    log("saveCurrentTabsToBookmarks live snapshot failed, using cache: " + t);
+                    exportCachedTabsToBookmarks(folderName, uiContext, "liveSnapshotFailed");
                 }
             }
         });
+    }
+
+    private static void exportCachedTabsToBookmarks(final String folderName, final Context uiContext, final String reason) {
+        WRITER.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    List<TabRecord> tabs = readFallbackTabRecords();
+                    if (tabs.size() == 0) {
+                        log("saveCurrentTabsToBookmarks cache empty: reason=" + reason);
+                        toast(uiContext, "标签管理器未就绪，且没有读取到缓存标签");
+                        return;
+                    }
+                    log("saveCurrentTabsToBookmarks cache snapshot: reason=" + reason + " tabs=" + tabs.size());
+                    saveAndExportTabsNow(folderName, tabs, uiContext, "cache." + reason);
+                } catch (Throwable t) {
+                    log("saveCurrentTabsToBookmarks cache export failed: " + t);
+                    toast(uiContext, "缓存导出失败：" + shortError(t));
+                }
+            }
+        });
+    }
+
+    private static void saveAndExportTabs(final String folderName, final List<TabRecord> tabs,
+                                          final Context uiContext, final String source) {
+        WRITER.execute(new Runnable() {
+            @Override
+            public void run() {
+                saveAndExportTabsNow(folderName, tabs, uiContext, source);
+            }
+        });
+    }
+
+    private static void saveAndExportTabsNow(String folderName, List<TabRecord> tabs,
+                                             Context uiContext, String source) {
+        BookmarkSaveResult result = new BookmarkSaveResult();
+        try {
+            result = saveTabsToViaBookmarks(folderName, tabs);
+        } catch (Throwable t) {
+            result.error = shortError(t);
+            log("save tabs to Via bookmarks failed, export will continue: " + t);
+        }
+        String exportPath = writeBookmarkSaveSnapshot(folderName, tabs, result, source);
+        log("saved tabs export: source=" + source + " folder=" + folderName + " tabs=" + tabs.size()
+                + " inserted=" + result.inserted + " skipped=" + result.skipped + " export=" + exportPath
+                + (result.error == null ? "" : " bookmarkError=" + result.error));
+        if (exportPath == null || exportPath.length() == 0) {
+            toast(uiContext, "导出失败：未写入 Download/ViaTabsAgent");
+        } else if (source != null && source.startsWith("cache.")) {
+            toast(uiContext, "已从缓存导出 " + tabs.size() + " 个标签到 Download/ViaTabsAgent");
+        } else {
+            toast(uiContext, "已保存 " + result.inserted + " 个书签，已导出 " + tabs.size() + " 个标签");
+        }
     }
 
     private static void groupCurrentTabs(final String groupId, final String groupName, final String color,
@@ -787,6 +826,55 @@ public class Hook implements IXposedHookLoadPackage {
             records.add(new TabRecord(i, title, url));
         }
         return records;
+    }
+
+    private static List<TabRecord> readFallbackTabRecords() {
+        ArrayList<TabRecord> records = new ArrayList<TabRecord>();
+        LinkedHashSet<String> seen = new LinkedHashSet<String>();
+        try {
+            File dir = agentDir();
+            addRecordsFromSnapshotFile(records, new File(dir, "tabs.json"), seen);
+            addRecordsFromSnapshotFile(records, new File(dir, "agent-session.json"), seen);
+            addRecordsFromSnapshotFile(records, new File(dir, "webview-fallback.json"), seen);
+        } catch (Throwable t) {
+            log("read fallback tab records failed: " + t);
+        }
+        return records;
+    }
+
+    private static void addRecordsFromSnapshotFile(List<TabRecord> out, File file, Set<String> seen) {
+        try {
+            if (file == null || !file.exists() || file.length() <= 0 || file.length() > 1024 * 1024) {
+                return;
+            }
+            JSONObject root = readJsonFile(file);
+            JSONArray tabs = root.optJSONArray("tabs");
+            if (tabs == null) {
+                return;
+            }
+            int before = out.size();
+            for (int i = 0; i < tabs.length(); i++) {
+                JSONObject tab = tabs.optJSONObject(i);
+                if (tab == null) {
+                    continue;
+                }
+                String url = tab.optString("url", "").trim();
+                if (url.length() == 0 || "null".equals(url)) {
+                    continue;
+                }
+                if (!seen.add(url)) {
+                    continue;
+                }
+                String title = tab.optString("title", "").trim();
+                if (title.length() == 0 || "null".equals(title)) {
+                    title = titleFromUrl(url);
+                }
+                out.add(new TabRecord(out.size(), title, url));
+            }
+            log("read fallback snapshot: file=" + file.getName() + " added=" + (out.size() - before));
+        } catch (Throwable t) {
+            log("read fallback snapshot failed: file=" + (file == null ? "null" : file.getName()) + " error=" + t);
+        }
     }
 
     private static String titleFromViaTab(Object tab) {
@@ -957,13 +1045,15 @@ public class Hook implements IXposedHookLoadPackage {
         return -1;
     }
 
-    private static String writeBookmarkSaveSnapshot(String folderName, List<TabRecord> tabs, BookmarkSaveResult result) {
+    private static String writeBookmarkSaveSnapshot(String folderName, List<TabRecord> tabs, BookmarkSaveResult result, String source) {
         try {
             JSONObject root = baseSnapshot("bookmarks.saveTabs");
+            root.put("captureSource", source == null ? JSONObject.NULL : source);
             root.put("folder", folderName);
             root.put("folderId", result.folderId == null ? JSONObject.NULL : result.folderId);
             root.put("inserted", result.inserted);
             root.put("skipped", result.skipped);
+            root.put("bookmarkError", result.error == null ? JSONObject.NULL : result.error);
             root.put("tabs", toTabRecordArray(tabs));
             String fileName = "saved-bookmarks-" + System.currentTimeMillis() + ".json";
             root.put("exportPath", "Download/ViaTabsAgent/" + fileName);
@@ -1650,5 +1740,6 @@ public class Hook implements IXposedHookLoadPackage {
         String folderId;
         int inserted;
         int skipped;
+        String error;
     }
 }

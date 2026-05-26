@@ -16,6 +16,7 @@ public class ExportProvider extends ContentProvider {
     static final String METHOD_GET_SETTINGS = "getSettings";
     static final String METHOD_SET_TAB_EXPORT_ENABLED = "setTabExportEnabled";
     static final String METHOD_SET_BOOKMARK_IMPORT_ENABLED = "setBookmarkImportEnabled";
+    static final String METHOD_SET_DOMAIN_GROUP_ENABLED = "setDomainGroupEnabled";
     static final String EXTRA_FILE_NAME = "fileName";
     static final String EXTRA_PAYLOAD = "payload";
     static final String EXTRA_MESSAGE = "message";
@@ -25,6 +26,7 @@ public class ExportProvider extends ContentProvider {
     static final String EXTRA_PANEL_ENABLED = "panelEnabled";
     static final String EXTRA_TAB_EXPORT_ENABLED = "tabExportEnabled";
     static final String EXTRA_BOOKMARK_IMPORT_ENABLED = "bookmarkImportEnabled";
+    static final String EXTRA_DOMAIN_GROUP_ENABLED = "domainGroupEnabled";
 
     @Override
     public boolean onCreate() {
@@ -62,6 +64,7 @@ public class ExportProvider extends ContentProvider {
                 result.putBoolean(EXTRA_PANEL_ENABLED, AgentStore.isExportEnabled(getContext()));
                 result.putBoolean(EXTRA_TAB_EXPORT_ENABLED, AgentStore.isTabExportEnabled(getContext()));
                 result.putBoolean(EXTRA_BOOKMARK_IMPORT_ENABLED, AgentStore.isBookmarkImportEnabled(getContext()));
+                result.putBoolean(EXTRA_DOMAIN_GROUP_ENABLED, AgentStore.isDomainGroupEnabled(getContext()));
             } else if (METHOD_SET_TAB_EXPORT_ENABLED.equals(method)) {
                 boolean enabled = extras == null || extras.getBoolean(EXTRA_TAB_EXPORT_ENABLED, true);
                 AgentStore.setTabExportEnabled(getContext(), enabled);
@@ -72,6 +75,11 @@ public class ExportProvider extends ContentProvider {
                 AgentStore.setBookmarkImportEnabled(getContext(), enabled);
                 AgentStore.appendLog(getContext(), "标签导入到书签: " + (enabled ? "开启" : "关闭"));
                 result.putBoolean(EXTRA_BOOKMARK_IMPORT_ENABLED, enabled);
+            } else if (METHOD_SET_DOMAIN_GROUP_ENABLED.equals(method)) {
+                boolean enabled = extras != null && extras.getBoolean(EXTRA_DOMAIN_GROUP_ENABLED, false);
+                AgentStore.setDomainGroupEnabled(getContext(), enabled);
+                AgentStore.appendLog(getContext(), "按域名整理: " + (enabled ? "开启" : "关闭"));
+                result.putBoolean(EXTRA_DOMAIN_GROUP_ENABLED, enabled);
             }
         } catch (Throwable t) {
             AgentStore.appendLog(getContext(), method + " 失败: " + t);

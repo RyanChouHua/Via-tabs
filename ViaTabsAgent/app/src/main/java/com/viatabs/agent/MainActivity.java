@@ -18,6 +18,7 @@ public class MainActivity extends Activity {
     private CheckBox exportSwitch;
     private CheckBox tabExportSwitch;
     private CheckBox bookmarkImportSwitch;
+    private CheckBox domainGroupSwitch;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -101,6 +102,23 @@ public class MainActivity extends Activity {
         root.addView(bookmarkImportSwitch, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
+        domainGroupSwitch = new CheckBox(this);
+        domainGroupSwitch.setText("按域名整理书签");
+        domainGroupSwitch.setChecked(AgentStore.isDomainGroupEnabled(this));
+        domainGroupSwitch.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                boolean enabled = domainGroupSwitch.isChecked();
+                AgentStore.setDomainGroupEnabled(MainActivity.this, enabled);
+                AgentStore.appendLog(MainActivity.this, "按域名整理: " + (enabled ? "开启" : "关闭"));
+                refreshStatus();
+                refreshLog();
+                Toast.makeText(MainActivity.this, enabled ? "已启用按域名整理" : "已关闭按域名整理", Toast.LENGTH_SHORT).show();
+            }
+        });
+        root.addView(domainGroupSwitch, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
         LinearLayout buttons = new LinearLayout(this);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
 
@@ -169,6 +187,7 @@ public class MainActivity extends Activity {
         boolean enabled = AgentStore.isExportEnabled(this);
         boolean tabExport = AgentStore.isTabExportEnabled(this);
         boolean bookmarkImport = AgentStore.isBookmarkImportEnabled(this);
+        boolean domainGroup = AgentStore.isDomainGroupEnabled(this);
         StringBuilder status = new StringBuilder();
         status.append("模块版本: ").append(BuildConfig.VERSION_NAME)
                 .append(" (").append(BuildConfig.VERSION_CODE).append(")\n");
@@ -177,6 +196,7 @@ public class MainActivity extends Activity {
         status.append("按钮开关: ").append(enabled ? "开启" : "关闭").append("\n");
         status.append("标签导出功能: ").append(tabExport ? "开启" : "关闭").append("\n");
         status.append("标签导入到书签: ").append(bookmarkImport ? "开启" : "关闭").append("\n");
+        status.append("按域名整理: ").append(domainGroup ? "开启" : "关闭").append("\n");
         status.append("注入状态: 查看日志中是否出现 module attached in mark.via / mark.via.gp");
         statusView.setText(status.toString());
         if (exportSwitch != null) {
@@ -187,6 +207,9 @@ public class MainActivity extends Activity {
         }
         if (bookmarkImportSwitch != null) {
             bookmarkImportSwitch.setChecked(bookmarkImport);
+        }
+        if (domainGroupSwitch != null) {
+            domainGroupSwitch.setChecked(domainGroup);
         }
     }
 

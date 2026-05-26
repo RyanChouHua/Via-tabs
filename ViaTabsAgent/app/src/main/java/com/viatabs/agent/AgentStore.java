@@ -31,6 +31,7 @@ final class AgentStore {
     static final String KEY_EXPORT_ENABLED = "export_enabled";
     static final String KEY_TAB_EXPORT_ENABLED = "tab_export_enabled";
     static final String KEY_BOOKMARK_IMPORT_ENABLED = "bookmark_import_enabled";
+    static final String KEY_DOMAIN_GROUP_ENABLED = "domain_group_enabled";
 
     private static final int MAX_LOG_BYTES = 64 * 1024;
 
@@ -105,6 +106,24 @@ final class AgentStore {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit()
                 .putBoolean(KEY_BOOKMARK_IMPORT_ENABLED, enabled)
+                .apply();
+    }
+
+    static boolean isDomainGroupEnabled(Context context) {
+        if (context == null) {
+            return false;
+        }
+        SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        return prefs.getBoolean(KEY_DOMAIN_GROUP_ENABLED, false);
+    }
+
+    static void setDomainGroupEnabled(Context context, boolean enabled) {
+        if (context == null) {
+            return;
+        }
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_DOMAIN_GROUP_ENABLED, enabled)
                 .apply();
     }
 

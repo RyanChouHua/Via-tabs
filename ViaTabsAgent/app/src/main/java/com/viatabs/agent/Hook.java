@@ -40,6 +40,7 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Enumeration;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -369,7 +370,7 @@ public class Hook implements IXposedHookLoadPackage {
 
     private static ExportSettings readExportSettings() {
         if (appContext == null) {
-            return new ExportSettings(true, true, true);
+            return new ExportSettings(true, true, true, false);
         }
         try {
             Bundle result = appContext.getContentResolver().call(
@@ -378,15 +379,16 @@ public class Hook implements IXposedHookLoadPackage {
                     null,
                     null);
             if (result == null) {
-                return new ExportSettings(true, true, true);
+                return new ExportSettings(true, true, true, false);
             }
             return new ExportSettings(
                     result.getBoolean(ExportProvider.EXTRA_PANEL_ENABLED, true),
                     result.getBoolean(ExportProvider.EXTRA_TAB_EXPORT_ENABLED, true),
-                    result.getBoolean(ExportProvider.EXTRA_BOOKMARK_IMPORT_ENABLED, true));
+                    result.getBoolean(ExportProvider.EXTRA_BOOKMARK_IMPORT_ENABLED, true),
+                    result.getBoolean(ExportProvider.EXTRA_DOMAIN_GROUP_ENABLED, false));
         } catch (Throwable t) {
             log("read export settings failed, default enabled: " + t);
-            return new ExportSettings(true, true, true);
+            return new ExportSettings(true, true, true, false);
         }
     }
 
@@ -394,11 +396,14 @@ public class Hook implements IXposedHookLoadPackage {
         final boolean panelEnabled;
         final boolean tabExportEnabled;
         final boolean bookmarkImportEnabled;
+        final boolean domainGroupEnabled;
 
-        ExportSettings(boolean panelEnabled, boolean tabExportEnabled, boolean bookmarkImportEnabled) {
+        ExportSettings(boolean panelEnabled, boolean tabExportEnabled, boolean bookmarkImportEnabled,
+                       boolean domainGroupEnabled) {
             this.panelEnabled = panelEnabled;
             this.tabExportEnabled = tabExportEnabled;
             this.bookmarkImportEnabled = bookmarkImportEnabled;
+            this.domainGroupEnabled = domainGroupEnabled;
         }
     }
 
@@ -1110,11 +1115,12 @@ public class Hook implements IXposedHookLoadPackage {
             toast(uiContext, "请先在模块中开启标签导出或标签导入到书签");
             return;
         }
+        BookmarkBatch batch = createBookmarkBatch(tabs, settings.domainGroupEnabled);
 
         BookmarkSaveResult result = new BookmarkSaveResult();
         if (settings.bookmarkImportEnabled) {
             try {
-                result = saveTabsToViaBookmarks(folderName, tabs);
+                result = saveTabsToViaBookmarks(batch, tabs);
             } catch (Throwable t) {
                 result.error = shortError(t);
                 log("save tabs to Via bookmarks failed, export will continue: " + t);
@@ -1122,12 +1128,13 @@ public class Hook implements IXposedHookLoadPackage {
         }
 
         String exportPath = settings.tabExportEnabled
-                ? writeBookmarkSaveSnapshot(folderName, tabs, result, source)
+                ? writeBookmarkSaveSnapshot(batch, tabs, result, source)
                 : null;
 
-        log("saved tabs export: source=" + source + " folder=" + folderName + " tabs=" + tabs.size()
+        log("saved tabs export: source=" + source + " folder=" + batch.folderName + " tabs=" + tabs.size()
                 + " tabExport=" + settings.tabExportEnabled
                 + " bookmarkImport=" + settings.bookmarkImportEnabled
+                + " domainGroup=" + settings.domainGroupEnabled
                 + " inserted=" + result.inserted + " skipped=" + result.skipped + " export=" + exportPath
                 + (result.error == null ? "" : " bookmarkError=" + result.error));
 
@@ -1438,7 +1445,36 @@ public class Hook implements IXposedHookLoadPackage {
         return url;
     }
 
-    private static BookmarkSaveResult saveTabsToViaBookmarks(String folderName, List<TabRecord> tabs) throws Exception {
+    private static BookmarkBatch createBookmarkBatch(List<TabRecord> tabs, boolean groupByDomain) {
+        long now = System.currentTimeMillis();
+        int bookmarkCount = countBookmarkableTabs(tabs);
+        String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date(now));
+        String folderName = "书签-" + stamp + "-" + bookmarkCount;
+        String fileBaseName = "via-" + stamp + "-" + bookmarkCount;
+        return new BookmarkBatch(folderName, fileBaseName, now / 1000L, groupByDomain, groupTabsByDomain(tabs));
+    }
+
+    private static LinkedHashMap<String, List<TabRecord>> groupTabsByDomain(List<TabRecord> tabs) {
+        LinkedHashMap<String, List<TabRecord>> groups = new LinkedHashMap<String, List<TabRecord>>();
+        if (tabs == null) {
+            return groups;
+        }
+        for (TabRecord tab : tabs) {
+            if (tab == null || !isBookmarkableUrl(tab.url)) {
+                continue;
+            }
+            String groupName = domainGroupName(tab.url);
+            List<TabRecord> group = groups.get(groupName);
+            if (group == null) {
+                group = new ArrayList<TabRecord>();
+                groups.put(groupName, group);
+            }
+            group.add(tab);
+        }
+        return groups;
+    }
+
+    private static BookmarkSaveResult saveTabsToViaBookmarks(BookmarkBatch batch, List<TabRecord> tabs) throws Exception {
         BookmarkSaveResult result = new BookmarkSaveResult();
         if (appContext == null || tabs.isEmpty()) {
             return result;
@@ -1450,31 +1486,26 @@ public class Hook implements IXposedHookLoadPackage {
             ensureBookmarkTables(db);
             db.beginTransaction();
             transactionStarted = true;
-            String folderId = ensureBookmarkFolder(db, folderName);
-            int ordering = maxOrdering(db, "bookmark_items", "folder_id", folderId) + 1;
+            String folderId = ensureBookmarkFolder(db, batch.folderName, "");
             long now = System.currentTimeMillis() / 1000L;
-            for (TabRecord tab : tabs) {
-                if (!isBookmarkableUrl(tab.url)) {
-                    result.skipped++;
-                    continue;
+            if (batch.groupByDomain) {
+                for (TabRecord tab : tabs) {
+                    if (tab == null || !isBookmarkableUrl(tab.url)) {
+                        result.skipped++;
+                    }
                 }
-                if (bookmarkExists(db, folderId, tab.url)) {
-                    result.skipped++;
-                    continue;
+                int folderOrdering = maxOrdering(db, "bookmark_folders", "parent_folder_id", folderId) + 1;
+                for (Map.Entry<String, List<TabRecord>> entry : batch.domainGroups.entrySet()) {
+                    String childFolderId = ensureBookmarkFolder(db, entry.getKey(), folderId, folderOrdering++);
+                    int ordering = maxOrdering(db, "bookmark_items", "folder_id", childFolderId) + 1;
+                    for (TabRecord tab : entry.getValue()) {
+                        ordering = insertBookmarkIfNeeded(db, childFolderId, tab, ordering, now, result);
+                    }
                 }
-                ContentValues values = new ContentValues();
-                values.put("_id", UUID.randomUUID().toString());
-                values.put("url", tab.url);
-                values.put("title", tab.title);
-                values.put("folder_id", folderId);
-                values.put("ordering", ordering++);
-                values.put("created_at", now);
-                values.put("last_updated_at", now);
-                long row = db.insert("bookmark_items", null, values);
-                if (row >= 0) {
-                    result.inserted++;
-                } else {
-                    result.skipped++;
+            } else {
+                int ordering = maxOrdering(db, "bookmark_items", "folder_id", folderId) + 1;
+                for (TabRecord tab : tabs) {
+                    ordering = insertBookmarkIfNeeded(db, folderId, tab, ordering, now, result);
                 }
             }
             db.setTransactionSuccessful();
@@ -1493,6 +1524,33 @@ public class Hook implements IXposedHookLoadPackage {
         return result;
     }
 
+    private static int insertBookmarkIfNeeded(SQLiteDatabase db, String folderId, TabRecord tab,
+                                              int ordering, long now, BookmarkSaveResult result) {
+        if (tab == null || !isBookmarkableUrl(tab.url)) {
+            result.skipped++;
+            return ordering;
+        }
+        if (bookmarkExists(db, folderId, tab.url)) {
+            result.skipped++;
+            return ordering;
+        }
+        ContentValues values = new ContentValues();
+        values.put("_id", UUID.randomUUID().toString());
+        values.put("url", tab.url);
+        values.put("title", tab.title);
+        values.put("folder_id", folderId);
+        values.put("ordering", ordering);
+        values.put("created_at", now);
+        values.put("last_updated_at", now);
+        long row = db.insert("bookmark_items", null, values);
+        if (row >= 0) {
+            result.inserted++;
+            return ordering + 1;
+        }
+        result.skipped++;
+        return ordering;
+    }
+
     private static boolean isBookmarkableUrl(String url) {
         if (url == null) {
             return false;
@@ -1501,14 +1559,63 @@ public class Hook implements IXposedHookLoadPackage {
         return normalized.startsWith("http://") || normalized.startsWith("https://");
     }
 
+    private static String domainGroupName(String url) {
+        try {
+            String host = Uri.parse(url).getHost();
+            if (host == null || host.trim().length() == 0) {
+                return "other";
+            }
+            String[] parts = host.toLowerCase(Locale.US).split("\\.");
+            for (int i = parts.length - 1; i >= 0; i--) {
+                String part = parts[i] == null ? "" : parts[i].trim();
+                if (part.length() == 0 || "www".equals(part) || isPublicSuffixLabel(part)) {
+                    continue;
+                }
+                return part;
+            }
+        } catch (Throwable ignored) {
+        }
+        return "other";
+    }
+
+    private static boolean isPublicSuffixLabel(String label) {
+        return "com".equals(label)
+                || "cn".equals(label)
+                || "net".equals(label)
+                || "org".equals(label)
+                || "edu".equals(label)
+                || "gov".equals(label)
+                || "mil".equals(label)
+                || "io".equals(label)
+                || "ai".equals(label)
+                || "ws".equals(label)
+                || "xyz".equals(label)
+                || "top".equals(label)
+                || "cc".equals(label)
+                || "me".equals(label)
+                || "app".equals(label)
+                || "dev".equals(label)
+                || "info".equals(label)
+                || "biz".equals(label)
+                || "co".equals(label)
+                || "uk".equals(label)
+                || "jp".equals(label)
+                || "tv".equals(label);
+    }
+
     private static void ensureBookmarkTables(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE IF NOT EXISTS bookmark_items(_id TEXT PRIMARY KEY,url TEXT,title TEXT,folder_id TEXT,ordering INTEGER,last_updated_at INTEGER DEFAULT 0,created_at INTEGER DEFAULT 0)");
         db.execSQL("CREATE TABLE IF NOT EXISTS bookmark_folders(_id TEXT PRIMARY KEY,title TEXT,parent_folder_id TEXT,ordering INTEGER,created_at INTEGER DEFAULT 0,last_updated_at INTEGER DEFAULT 0)");
     }
 
-    private static String ensureBookmarkFolder(SQLiteDatabase db, String folderName) {
+    private static String ensureBookmarkFolder(SQLiteDatabase db, String folderName, String parentId) {
+        return ensureBookmarkFolder(db, folderName, parentId, maxOrdering(db, "bookmark_folders", "parent_folder_id", parentId) + 1);
+    }
+
+    private static String ensureBookmarkFolder(SQLiteDatabase db, String folderName, String parentId, int ordering) {
         String safeName = folderName == null || folderName.trim().length() == 0 ? "ViaTabsAgent" : folderName.trim();
-        String existing = findBookmarkFolder(db, safeName, "");
+        String safeParentId = parentId == null ? "" : parentId;
+        String existing = findBookmarkFolder(db, safeName, safeParentId);
         if (existing != null) {
             return existing;
         }
@@ -1517,8 +1624,8 @@ public class Hook implements IXposedHookLoadPackage {
         ContentValues values = new ContentValues();
         values.put("_id", id);
         values.put("title", safeName);
-        values.put("parent_folder_id", "");
-        values.put("ordering", maxOrdering(db, "bookmark_folders", "parent_folder_id", "") + 1);
+        values.put("parent_folder_id", safeParentId);
+        values.put("ordering", ordering);
         values.put("created_at", now);
         values.put("last_updated_at", now);
         db.insert("bookmark_folders", null, values);
@@ -1570,24 +1677,22 @@ public class Hook implements IXposedHookLoadPackage {
         return -1;
     }
 
-    private static String writeBookmarkSaveSnapshot(String folderName, List<TabRecord> tabs, BookmarkSaveResult result, String source) {
+    private static String writeBookmarkSaveSnapshot(BookmarkBatch batch, List<TabRecord> tabs,
+                                                    BookmarkSaveResult result, String source) {
         try {
             JSONObject root = baseSnapshot("bookmarks.saveTabs");
             root.put("captureSource", source == null ? JSONObject.NULL : source);
-            root.put("folder", folderName);
+            root.put("folder", batch.folderName);
             root.put("folderId", result.folderId == null ? JSONObject.NULL : result.folderId);
+            root.put("domainGroup", batch.groupByDomain);
             root.put("inserted", result.inserted);
             root.put("skipped", result.skipped);
             root.put("bookmarkError", result.error == null ? JSONObject.NULL : result.error);
             root.put("tabs", toTabRecordArray(tabs));
-            long now = System.currentTimeMillis();
-            int bookmarkCount = countBookmarkableTabs(tabs);
-            String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date(now));
-            String baseName = "via-" + stamp + "-" + bookmarkCount;
-            String htmlFileName = baseName + ".html";
-            String htmlPath = writeJsonToDownloadsNow(htmlFileName, toNetscapeBookmarksHtml(folderName, tabs, now / 1000L));
+            String htmlFileName = batch.fileBaseName + ".html";
+            String htmlPath = writeJsonToDownloadsNow(htmlFileName, toNetscapeBookmarksHtml(batch, tabs));
             root.put("htmlExportPath", htmlPath == null ? JSONObject.NULL : "Download/ViaTabsAgent/" + htmlFileName);
-            String fileName = baseName + ".json";
+            String fileName = batch.fileBaseName + ".json";
             root.put("exportPath", "Download/ViaTabsAgent/" + fileName);
             String jsonPath = writeJsonToDownloadsNow(fileName, root.toString(2));
             if (htmlPath != null) {
@@ -1640,10 +1745,11 @@ public class Hook implements IXposedHookLoadPackage {
         return tabs;
     }
 
-    private static String toNetscapeBookmarksHtml(String folderName, List<TabRecord> tabs, long addDate) {
-        String safeFolder = folderName == null || folderName.trim().length() == 0
+    private static String toNetscapeBookmarksHtml(BookmarkBatch batch, List<TabRecord> tabs) {
+        String safeFolder = batch.folderName == null || batch.folderName.trim().length() == 0
                 ? "ViaTabsAgent"
-                : folderName.trim();
+                : batch.folderName.trim();
+        long addDate = batch.addDate;
         StringBuilder html = new StringBuilder();
         html.append("<!DOCTYPE NETSCAPE-Bookmark-file-1>\n");
         html.append("<!-- This is an automatically generated file.\n");
@@ -1656,22 +1762,37 @@ public class Hook implements IXposedHookLoadPackage {
         html.append("  <DT><H3 ADD_DATE=\"").append(addDate).append("\">")
                 .append(escapeBookmarkHtml(safeFolder)).append("</H3>\n");
         html.append("  <DL><p>\n");
-        if (tabs != null) {
-            for (TabRecord tab : tabs) {
-                if (tab == null || !isBookmarkableUrl(tab.url)) {
-                    continue;
-                }
-                String title = tab.title == null || tab.title.trim().length() == 0
-                        ? titleFromUrl(tab.url)
-                        : tab.title.trim();
-                html.append("    <DT><A HREF=\"").append(escapeBookmarkHtml(tab.url))
-                        .append("\" ADD_DATE=\"").append(addDate).append("\">")
-                        .append(escapeBookmarkHtml(title)).append("</A>\n");
+        if (batch.groupByDomain) {
+            for (Map.Entry<String, List<TabRecord>> entry : batch.domainGroups.entrySet()) {
+                html.append("    <DT><H3 ADD_DATE=\"").append(addDate).append("\">")
+                        .append(escapeBookmarkHtml(entry.getKey())).append("</H3>\n");
+                html.append("    <DL><p>\n");
+                appendBookmarkLinks(html, entry.getValue(), addDate, "      ");
+                html.append("    </DL><p>\n");
             }
+        } else {
+            appendBookmarkLinks(html, tabs, addDate, "    ");
         }
         html.append("  </DL><p>\n");
         html.append("</DL><p>\n");
         return html.toString();
+    }
+
+    private static void appendBookmarkLinks(StringBuilder html, List<TabRecord> tabs, long addDate, String indent) {
+        if (tabs == null) {
+            return;
+        }
+        for (TabRecord tab : tabs) {
+            if (tab == null || !isBookmarkableUrl(tab.url)) {
+                continue;
+            }
+            String title = tab.title == null || tab.title.trim().length() == 0
+                    ? titleFromUrl(tab.url)
+                    : tab.title.trim();
+            html.append(indent).append("<DT><A HREF=\"").append(escapeBookmarkHtml(tab.url))
+                    .append("\" ADD_DATE=\"").append(addDate).append("\">")
+                    .append(escapeBookmarkHtml(title)).append("</A>\n");
+        }
     }
 
     private static String escapeBookmarkHtml(String value) {
@@ -2109,5 +2230,22 @@ public class Hook implements IXposedHookLoadPackage {
         int inserted;
         int skipped;
         String error;
+    }
+
+    private static final class BookmarkBatch {
+        final String folderName;
+        final String fileBaseName;
+        final long addDate;
+        final boolean groupByDomain;
+        final LinkedHashMap<String, List<TabRecord>> domainGroups;
+
+        BookmarkBatch(String folderName, String fileBaseName, long addDate, boolean groupByDomain,
+                      LinkedHashMap<String, List<TabRecord>> domainGroups) {
+            this.folderName = folderName;
+            this.fileBaseName = fileBaseName;
+            this.addDate = addDate;
+            this.groupByDomain = groupByDomain;
+            this.domainGroups = domainGroups;
+        }
     }
 }

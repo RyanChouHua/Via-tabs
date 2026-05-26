@@ -21,7 +21,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.WebView;
-import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -74,6 +74,7 @@ public class Hook implements IXposedHookLoadPackage {
     private static volatile Method switchTabMethod;
     private static volatile Method sessionBundleMethod;
     private static final WeakHashMap<Activity, View> PANEL_BUTTONS = new WeakHashMap<Activity, View>();
+    private static final WeakHashMap<Activity, Integer> PANEL_INSTALL_RETRIES = new WeakHashMap<Activity, Integer>();
     private static final ExecutorService WRITER = Executors.newSingleThreadExecutor();
     private static final ThreadLocal<Boolean> IN_MANAGER_SNAPSHOT = new ThreadLocal<Boolean>();
     private static final ThreadLocal<Boolean> IN_WEBVIEW_CAPTURE = new ThreadLocal<Boolean>();
@@ -304,9 +305,11 @@ public class Hook implements IXposedHookLoadPackage {
         if (!VIA_CN.equals(packageName) && !VIA_GP.equals(packageName)) {
             return;
         }
-        if (!isExportEnabled()) {
+        final ExportSettings settings = readExportSettings();
+        if (!settings.panelEnabled) {
             removePanelButton(activity);
-            log("panel button hidden: export disabled");
+            PANEL_INSTALL_RETRIES.remove(activity);
+            log("toolbar entry hidden: panel disabled");
             return;
         }
         if (PANEL_BUTTONS.containsKey(activity)) {
@@ -316,41 +319,140 @@ public class Hook implements IXposedHookLoadPackage {
         if (content == null) {
             return;
         }
+        ViewGroup toolbar = findToolbarContainer(content);
+        if (toolbar == null) {
+            scheduleToolbarInstallRetry(activity, content);
+            return;
+        }
+        PANEL_INSTALL_RETRIES.remove(activity);
         final TextView button = new TextView(activity);
         button.setText("\u4e66\u7b7e");
         button.setTextColor(0xffffffff);
         button.setTextSize(12f);
         button.setGravity(Gravity.CENTER);
-        button.setBackgroundColor(0xcc1f6feb);
+        button.setBackgroundColor(0x00000000);
         button.setPadding(dp(activity, 10), dp(activity, 8), dp(activity, 10), dp(activity, 8));
-        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(dp(activity, 58), dp(activity, 42));
-        params.gravity = Gravity.RIGHT | Gravity.CENTER_VERTICAL;
-        params.rightMargin = dp(activity, 8);
+        LinearLayout.LayoutParams linearParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.MATCH_PARENT);
+        linearParams.gravity = Gravity.CENTER_VERTICAL;
+        linearParams.leftMargin = dp(activity, 4);
+        linearParams.rightMargin = dp(activity, 4);
+        ViewGroup.LayoutParams params = toolbar instanceof LinearLayout
+                ? linearParams
+                : new ViewGroup.LayoutParams(dp(activity, 58), dp(activity, 42));
         try {
-            content.addView(button, params);
+            toolbar.addView(button, params);
             PANEL_BUTTONS.put(activity, button);
             button.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    if (!isExportEnabled()) {
-                        toast(activity, "\u5bfc\u51fa\u5df2\u5173\u95ed");
-                        log("panel export ignored: export disabled");
+                    ExportSettings current = readExportSettings();
+                    if (!current.panelEnabled) {
+                        toast(activity, "\u4e66\u7b7e\u5165\u53e3\u5df2\u5173\u95ed");
+                        log("toolbar export ignored: panel disabled");
+                        removePanelButton(activity);
                         return;
                     }
-                    log("panel export clicked");
+                    if (!current.saveToViaEnabled && !current.exportFileEnabled) {
+                        toast(activity, "\u8bf7\u5148\u5728\u6a21\u5757\u4e2d\u5f00\u542f\u4fdd\u5b58\u6216\u5bfc\u51fa");
+                        log("toolbar export ignored: all actions disabled");
+                        return;
+                    }
+                    log("toolbar bookmark clicked");
                     saveCurrentTabsToBookmarks("\u4e66\u7b7e", activity);
-                    toast(activity, "\u6b63\u5728\u5bfc\u51fa\u4e66\u7b7e");
+                    toast(activity, "\u6b63\u5728\u5904\u7406\u4e66\u7b7e");
                 }
             });
-            log("installed bookmark export button");
+            log("installed bookmark entry into Via toolbar: " + toolbar.getClass().getName());
         } catch (Throwable t) {
-            log("install panel button failed: " + t);
+            log("install toolbar entry failed: " + t);
         }
+    }
+
+    private static void scheduleToolbarInstallRetry(final Activity activity, ViewGroup content) {
+        Integer oldCount = PANEL_INSTALL_RETRIES.get(activity);
+        final int count = oldCount == null ? 0 : oldCount;
+        if (count >= 5) {
+            log("toolbar entry skipped: no Via toolbar container found after retry");
+            return;
+        }
+        PANEL_INSTALL_RETRIES.put(activity, count + 1);
+        content.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                maybeInstallPanelButton(activity);
+            }
+        }, 600L);
+    }
+
+    private static ViewGroup findToolbarContainer(View view) {
+        ToolbarCandidate best = findToolbarCandidate(view, null, 0);
+        return best == null ? null : best.view;
+    }
+
+    private static ToolbarCandidate findToolbarCandidate(View view, ToolbarCandidate best, int depth) {
+        if (!(view instanceof ViewGroup) || depth > 12) {
+            return best;
+        }
+        ViewGroup group = (ViewGroup) view;
+        ToolbarCandidate candidate = scoreToolbarCandidate(group, depth);
+        if (candidate != null && (best == null || candidate.score > best.score)) {
+            best = candidate;
+        }
+        for (int i = 0; i < group.getChildCount(); i++) {
+            best = findToolbarCandidate(group.getChildAt(i), best, depth + 1);
+        }
+        return best;
+    }
+
+    private static ToolbarCandidate scoreToolbarCandidate(ViewGroup group, int depth) {
+        if (group.getVisibility() != View.VISIBLE || group.getChildCount() < 2 || containsWebView(group)) {
+            return null;
+        }
+        int score = 0;
+        if (group instanceof LinearLayout
+                && ((LinearLayout) group).getOrientation() == LinearLayout.HORIZONTAL) {
+            score += 40;
+        }
+        int height = group.getHeight();
+        if (height > 0 && height <= dp(group.getContext(), 80)) {
+            score += 25;
+        }
+        int width = group.getWidth();
+        if (width > 0 && width >= dp(group.getContext(), 160)) {
+            score += 10;
+        }
+        if (group.isShown()) {
+            score += 10;
+        }
+        score += Math.max(0, 12 - depth);
+        if (score < 45) {
+            return null;
+        }
+        return new ToolbarCandidate(group, score);
+    }
+
+    private static boolean containsWebView(View view) {
+        if (view instanceof WebView) {
+            return true;
+        }
+        if (!(view instanceof ViewGroup)) {
+            return false;
+        }
+        ViewGroup group = (ViewGroup) view;
+        for (int i = 0; i < group.getChildCount(); i++) {
+            if (containsWebView(group.getChildAt(i))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void removePanelButton(Activity activity) {
         try {
             View button = PANEL_BUTTONS.remove(activity);
+            PANEL_INSTALL_RETRIES.remove(activity);
             if (button == null) {
                 return;
             }
@@ -364,19 +466,51 @@ public class Hook implements IXposedHookLoadPackage {
     }
 
     private static boolean isExportEnabled() {
+        return readExportSettings().panelEnabled;
+    }
+
+    private static ExportSettings readExportSettings() {
         if (appContext == null) {
-            return true;
+            return new ExportSettings(true, true, true);
         }
         try {
             Bundle result = appContext.getContentResolver().call(
                     AgentStore.EXPORT_URI,
-                    ExportProvider.METHOD_GET_EXPORT_ENABLED,
+                    ExportProvider.METHOD_GET_SETTINGS,
                     null,
                     null);
-            return result == null || result.getBoolean(ExportProvider.EXTRA_ENABLED, true);
+            if (result == null) {
+                return new ExportSettings(true, true, true);
+            }
+            return new ExportSettings(
+                    result.getBoolean(ExportProvider.EXTRA_PANEL_ENABLED, true),
+                    result.getBoolean(ExportProvider.EXTRA_SAVE_TO_VIA_ENABLED, true),
+                    result.getBoolean(ExportProvider.EXTRA_EXPORT_FILE_ENABLED, true));
         } catch (Throwable t) {
-            log("read export switch failed, default enabled: " + t);
-            return true;
+            log("read export settings failed, default enabled: " + t);
+            return new ExportSettings(true, true, true);
+        }
+    }
+
+    private static final class ToolbarCandidate {
+        final ViewGroup view;
+        final int score;
+
+        ToolbarCandidate(ViewGroup view, int score) {
+            this.view = view;
+            this.score = score;
+        }
+    }
+
+    private static final class ExportSettings {
+        final boolean panelEnabled;
+        final boolean saveToViaEnabled;
+        final boolean exportFileEnabled;
+
+        ExportSettings(boolean panelEnabled, boolean saveToViaEnabled, boolean exportFileEnabled) {
+            this.panelEnabled = panelEnabled;
+            this.saveToViaEnabled = saveToViaEnabled;
+            this.exportFileEnabled = exportFileEnabled;
         }
     }
 
@@ -1082,18 +1216,39 @@ public class Hook implements IXposedHookLoadPackage {
 
     private static void saveAndExportTabsNow(String folderName, List<TabRecord> tabs,
                                              Context uiContext, String source) {
-        BookmarkSaveResult result = new BookmarkSaveResult();
-        try {
-            result = saveTabsToViaBookmarks(folderName, tabs);
-        } catch (Throwable t) {
-            result.error = shortError(t);
-            log("save tabs to Via bookmarks failed, export will continue: " + t);
+        ExportSettings settings = readExportSettings();
+        if (!settings.saveToViaEnabled && !settings.exportFileEnabled) {
+            log("saved tabs skipped: saveToVia=false exportFile=false");
+            toast(uiContext, "\u8bf7\u5148\u5728\u6a21\u5757\u4e2d\u5f00\u542f\u4fdd\u5b58\u6216\u5bfc\u51fa");
+            return;
         }
-        String exportPath = writeBookmarkSaveSnapshot(folderName, tabs, result, source);
+        BookmarkSaveResult result = new BookmarkSaveResult();
+        if (settings.saveToViaEnabled) {
+            try {
+                result = saveTabsToViaBookmarks(folderName, tabs);
+            } catch (Throwable t) {
+                result.error = shortError(t);
+                log("save tabs to Via bookmarks failed, export will continue: " + t);
+            }
+        }
+        String exportPath = settings.exportFileEnabled
+                ? writeBookmarkSaveSnapshot(folderName, tabs, result, source)
+                : null;
         log("saved tabs export: source=" + source + " folder=" + folderName + " tabs=" + tabs.size()
+                + " saveToVia=" + settings.saveToViaEnabled + " exportFile=" + settings.exportFileEnabled
                 + " inserted=" + result.inserted + " skipped=" + result.skipped + " export=" + exportPath
                 + (result.error == null ? "" : " bookmarkError=" + result.error));
-        if (exportPath == null || exportPath.length() == 0) {
+        if (settings.saveToViaEnabled && !settings.exportFileEnabled) {
+            toast(uiContext, "已保存 " + result.inserted + " 个书签到 Via");
+        } else if (!settings.saveToViaEnabled && settings.exportFileEnabled) {
+            if (exportPath == null || exportPath.length() == 0) {
+                toast(uiContext, "导出失败：未写入 Download/ViaTabsAgent");
+            } else if (source != null && source.startsWith("cache.")) {
+                toast(uiContext, "已从缓存导出 " + tabs.size() + " 个标签到 Download/ViaTabsAgent");
+            } else {
+                toast(uiContext, "已导出 " + tabs.size() + " 个标签到 Download/ViaTabsAgent");
+            }
+        } else if (exportPath == null || exportPath.length() == 0) {
             toast(uiContext, "导出失败：未写入 Download/ViaTabsAgent");
         } else if (source != null && source.startsWith("cache.")) {
             toast(uiContext, "已从缓存导出 " + tabs.size() + " 个标签到 Download/ViaTabsAgent");

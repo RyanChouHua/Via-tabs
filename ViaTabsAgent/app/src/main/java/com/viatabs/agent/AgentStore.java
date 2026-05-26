@@ -29,6 +29,8 @@ final class AgentStore {
     static final String LOG_FILE = "agent-log.txt";
     static final String PREFS = "via_tabs_agent";
     static final String KEY_EXPORT_ENABLED = "export_enabled";
+    static final String KEY_SAVE_TO_VIA_ENABLED = "save_to_via_enabled";
+    static final String KEY_EXPORT_FILE_ENABLED = "export_file_enabled";
 
     private static final int MAX_LOG_BYTES = 64 * 1024;
 
@@ -67,6 +69,42 @@ final class AgentStore {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit()
                 .putBoolean(KEY_EXPORT_ENABLED, enabled)
+                .apply();
+    }
+
+    static boolean isSaveToViaEnabled(Context context) {
+        if (context == null) {
+            return true;
+        }
+        SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        return prefs.getBoolean(KEY_SAVE_TO_VIA_ENABLED, true);
+    }
+
+    static void setSaveToViaEnabled(Context context, boolean enabled) {
+        if (context == null) {
+            return;
+        }
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_SAVE_TO_VIA_ENABLED, enabled)
+                .apply();
+    }
+
+    static boolean isExportFileEnabled(Context context) {
+        if (context == null) {
+            return true;
+        }
+        SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        return prefs.getBoolean(KEY_EXPORT_FILE_ENABLED, true);
+    }
+
+    static void setExportFileEnabled(Context context, boolean enabled) {
+        if (context == null) {
+            return;
+        }
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_EXPORT_FILE_ENABLED, enabled)
                 .apply();
     }
 

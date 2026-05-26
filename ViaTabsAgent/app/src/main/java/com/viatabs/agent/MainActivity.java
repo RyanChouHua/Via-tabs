@@ -16,6 +16,8 @@ public class MainActivity extends Activity {
     private TextView logView;
     private TextView statusView;
     private CheckBox exportSwitch;
+    private CheckBox saveToViaSwitch;
+    private CheckBox exportFileSwitch;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -34,7 +36,7 @@ public class MainActivity extends Activity {
 
         TextView info = new TextView(this);
         info.setText("LSPosed 模块安装后，请在 LSPosed 中启用并勾选 mark.via / mark.via.gp。\n"
-                + "Via 内只保留导出书签按钮，导出目录：/storage/emulated/0/Download/ViaTabsAgent/\n"
+                + "Via 内会尝试把“书签”入口嵌入现有工具栏，导出目录：/storage/emulated/0/Download/ViaTabsAgent/\n"
                 + "书签文件名：书签-日期-数量.html / 书签-日期-数量.json\n"
                 + "日志文件：/storage/emulated/0/Download/ViaTabsAgent/agent-log.txt");
         info.setTextSize(14f);
@@ -63,6 +65,40 @@ public class MainActivity extends Activity {
             }
         });
         root.addView(exportSwitch, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        saveToViaSwitch = new CheckBox(this);
+        saveToViaSwitch.setText("保存并导入到 Via 书签");
+        saveToViaSwitch.setChecked(AgentStore.isSaveToViaEnabled(this));
+        saveToViaSwitch.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                boolean enabled = saveToViaSwitch.isChecked();
+                AgentStore.setSaveToViaEnabled(MainActivity.this, enabled);
+                AgentStore.appendLog(MainActivity.this, "保存到 Via 书签: " + (enabled ? "开启" : "关闭"));
+                refreshStatus();
+                refreshLog();
+                Toast.makeText(MainActivity.this, enabled ? "已启用保存到 Via 书签" : "已关闭保存到 Via 书签", Toast.LENGTH_SHORT).show();
+            }
+        });
+        root.addView(saveToViaSwitch, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        exportFileSwitch = new CheckBox(this);
+        exportFileSwitch.setText("导出 HTML/JSON 书签文件");
+        exportFileSwitch.setChecked(AgentStore.isExportFileEnabled(this));
+        exportFileSwitch.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                boolean enabled = exportFileSwitch.isChecked();
+                AgentStore.setExportFileEnabled(MainActivity.this, enabled);
+                AgentStore.appendLog(MainActivity.this, "导出文件: " + (enabled ? "开启" : "关闭"));
+                refreshStatus();
+                refreshLog();
+                Toast.makeText(MainActivity.this, enabled ? "已启用导出文件" : "已关闭导出文件", Toast.LENGTH_SHORT).show();
+            }
+        });
+        root.addView(exportFileSwitch, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         LinearLayout buttons = new LinearLayout(this);
@@ -131,16 +167,26 @@ public class MainActivity extends Activity {
 
     private void refreshStatus() {
         boolean enabled = AgentStore.isExportEnabled(this);
+        boolean saveToVia = AgentStore.isSaveToViaEnabled(this);
+        boolean exportFile = AgentStore.isExportFileEnabled(this);
         StringBuilder status = new StringBuilder();
         status.append("模块版本: ").append(BuildConfig.VERSION_NAME)
                 .append(" (").append(BuildConfig.VERSION_CODE).append(")\n");
         status.append("mark.via: ").append(isPackageInstalled("mark.via") ? "已安装" : "未安装").append("\n");
         status.append("mark.via.gp: ").append(isPackageInstalled("mark.via.gp") ? "已安装" : "未安装").append("\n");
-        status.append("导出开关: ").append(enabled ? "开启" : "关闭").append("\n");
+        status.append("工具栏入口: ").append(enabled ? "开启" : "关闭").append("\n");
+        status.append("保存到 Via 书签: ").append(saveToVia ? "开启" : "关闭").append("\n");
+        status.append("导出书签文件: ").append(exportFile ? "开启" : "关闭").append("\n");
         status.append("注入状态: 查看日志中是否出现 module attached in mark.via / mark.via.gp");
         statusView.setText(status.toString());
         if (exportSwitch != null) {
             exportSwitch.setChecked(enabled);
+        }
+        if (saveToViaSwitch != null) {
+            saveToViaSwitch.setChecked(saveToVia);
+        }
+        if (exportFileSwitch != null) {
+            exportFileSwitch.setChecked(exportFile);
         }
     }
 
@@ -178,7 +224,7 @@ public class MainActivity extends Activity {
                     + "操作顺序:\n"
                     + "1. 在 LSPosed 启用 ViaTabsAgent，并勾选 Via。\n"
                     + "2. 强制停止 Via 后重新打开。\n"
-                    + "3. 在 Via 内点击“书签”按钮导出。\n"
+                    + "3. 在 Via 工具栏内点击“书签”入口保存/导出。\n"
                     + "4. 回到这里点击“刷新日志”。";
         } else if (!log.contains("module attached in")
                 && !log.contains("loaded in mark.via")

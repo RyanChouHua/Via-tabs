@@ -13,12 +13,18 @@ public class ExportProvider extends ContentProvider {
     static final String METHOD_CLEAR_LOG = "clearLog";
     static final String METHOD_GET_EXPORT_ENABLED = "getExportEnabled";
     static final String METHOD_SET_EXPORT_ENABLED = "setExportEnabled";
+    static final String METHOD_GET_SETTINGS = "getSettings";
+    static final String METHOD_SET_SAVE_TO_VIA_ENABLED = "setSaveToViaEnabled";
+    static final String METHOD_SET_EXPORT_FILE_ENABLED = "setExportFileEnabled";
     static final String EXTRA_FILE_NAME = "fileName";
     static final String EXTRA_PAYLOAD = "payload";
     static final String EXTRA_MESSAGE = "message";
     static final String EXTRA_PATH = "path";
     static final String EXTRA_LOG = "log";
     static final String EXTRA_ENABLED = "enabled";
+    static final String EXTRA_PANEL_ENABLED = "panelEnabled";
+    static final String EXTRA_SAVE_TO_VIA_ENABLED = "saveToViaEnabled";
+    static final String EXTRA_EXPORT_FILE_ENABLED = "exportFileEnabled";
 
     @Override
     public boolean onCreate() {
@@ -52,6 +58,20 @@ public class ExportProvider extends ContentProvider {
                 AgentStore.setExportEnabled(getContext(), enabled);
                 AgentStore.appendLog(getContext(), "导出开关: " + (enabled ? "开启" : "关闭"));
                 result.putBoolean(EXTRA_ENABLED, enabled);
+            } else if (METHOD_GET_SETTINGS.equals(method)) {
+                result.putBoolean(EXTRA_PANEL_ENABLED, AgentStore.isExportEnabled(getContext()));
+                result.putBoolean(EXTRA_SAVE_TO_VIA_ENABLED, AgentStore.isSaveToViaEnabled(getContext()));
+                result.putBoolean(EXTRA_EXPORT_FILE_ENABLED, AgentStore.isExportFileEnabled(getContext()));
+            } else if (METHOD_SET_SAVE_TO_VIA_ENABLED.equals(method)) {
+                boolean enabled = extras == null || extras.getBoolean(EXTRA_SAVE_TO_VIA_ENABLED, true);
+                AgentStore.setSaveToViaEnabled(getContext(), enabled);
+                AgentStore.appendLog(getContext(), "保存到 Via 书签: " + (enabled ? "开启" : "关闭"));
+                result.putBoolean(EXTRA_SAVE_TO_VIA_ENABLED, enabled);
+            } else if (METHOD_SET_EXPORT_FILE_ENABLED.equals(method)) {
+                boolean enabled = extras == null || extras.getBoolean(EXTRA_EXPORT_FILE_ENABLED, true);
+                AgentStore.setExportFileEnabled(getContext(), enabled);
+                AgentStore.appendLog(getContext(), "导出文件: " + (enabled ? "开启" : "关闭"));
+                result.putBoolean(EXTRA_EXPORT_FILE_ENABLED, enabled);
             }
         } catch (Throwable t) {
             AgentStore.appendLog(getContext(), method + " 失败: " + t);

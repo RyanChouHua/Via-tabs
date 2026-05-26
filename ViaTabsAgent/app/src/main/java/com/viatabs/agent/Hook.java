@@ -2,12 +2,10 @@ package com.viatabs.agent;
 
 import android.app.Application;
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.content.ComponentName;
 import android.content.ContentValues;
 import android.content.BroadcastReceiver;
 import android.content.Context;
-import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.database.Cursor;
@@ -23,10 +21,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.WebView;
-import android.widget.CheckBox;
-import android.widget.EditText;
 import android.widget.FrameLayout;
-import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -40,11 +35,14 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Enumeration;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -90,10 +88,6 @@ public class Hook implements IXposedHookLoadPackage {
     private static final String ACTION_CLOSE_VIA = "com.viatabs.agent.CLOSE_VIA";
     private static final String ACTION_RESTORE_AGENT_SESSION = "com.viatabs.agent.RESTORE_AGENT_SESSION";
     private static final String ACTION_SAVE_TABS_TO_BOOKMARKS = "com.viatabs.agent.SAVE_TABS_TO_BOOKMARKS";
-    private static final String ACTION_GROUP_TABS = "com.viatabs.agent.GROUP_TABS";
-    private static final String ACTION_RESTORE_TAB_GROUP = "com.viatabs.agent.RESTORE_TAB_GROUP";
-    private static final String ACTION_ARCHIVE_TAB_GROUP = "com.viatabs.agent.ARCHIVE_TAB_GROUP";
-    private static final String ACTION_DELETE_TAB_GROUP = "com.viatabs.agent.DELETE_TAB_GROUP";
 
     @Override
     public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lpparam) {
@@ -193,10 +187,6 @@ public class Hook implements IXposedHookLoadPackage {
         filter.addAction(ACTION_CLOSE_VIA);
         filter.addAction(ACTION_RESTORE_AGENT_SESSION);
         filter.addAction(ACTION_SAVE_TABS_TO_BOOKMARKS);
-        filter.addAction(ACTION_GROUP_TABS);
-        filter.addAction(ACTION_RESTORE_TAB_GROUP);
-        filter.addAction(ACTION_ARCHIVE_TAB_GROUP);
-        filter.addAction(ACTION_DELETE_TAB_GROUP);
 
         BroadcastReceiver receiver = new BroadcastReceiver() {
             @Override
@@ -220,26 +210,12 @@ public class Hook implements IXposedHookLoadPackage {
                 } else if (ACTION_RESTORE_AGENT_SESSION.equals(action)) {
                     restoreAgentSession("broadcast.restoreAgentSession");
                 } else if (ACTION_SAVE_TABS_TO_BOOKMARKS.equals(action)) {
+                    if (!isExportEnabled()) {
+                        log("save broadcast ignored: export disabled");
+                        return;
+                    }
                     String folder = intent.getStringExtra("folder");
-                    saveCurrentTabsToBookmarks(folder == null ? "ViaTabsAgent" : folder);
-                } else if (ACTION_GROUP_TABS.equals(action)) {
-                    String groupId = intent.getStringExtra("groupId");
-                    String group = intent.getStringExtra("group");
-                    boolean saveBookmarks = intent.getBooleanExtra("bookmarks", true);
-                    String color = intent.getStringExtra("color");
-                    boolean archived = intent.getBooleanExtra("archived", false);
-                    boolean closeTabs = intent.getBooleanExtra("close", false);
-                    groupCurrentTabs(groupId, group, color, saveBookmarks, archived, closeTabs);
-                } else if (ACTION_RESTORE_TAB_GROUP.equals(action)) {
-                    restoreTabGroup(intent.getStringExtra("groupId"), intent.getStringExtra("group"),
-                            intent.getBooleanExtra("dedupe", true),
-                            intent.getIntExtra("index", -1),
-                            intent.getStringExtra("url"));
-                } else if (ACTION_ARCHIVE_TAB_GROUP.equals(action)) {
-                    updateTabGroupArchive(intent.getStringExtra("groupId"), intent.getStringExtra("group"),
-                            intent.getBooleanExtra("archived", true));
-                } else if (ACTION_DELETE_TAB_GROUP.equals(action)) {
-                    deleteTabGroup(intent.getStringExtra("groupId"), intent.getStringExtra("group"));
+                    saveCurrentTabsToBookmarks(folder == null ? "书签" : folder);
                 }
             }
         };
@@ -321,11 +297,19 @@ public class Hook implements IXposedHookLoadPackage {
     }
 
     private static void maybeInstallPanelButton(final Activity activity) {
-        if (activity == null || activity.isFinishing() || PANEL_BUTTONS.containsKey(activity)) {
+        if (activity == null || activity.isFinishing()) {
             return;
         }
         String packageName = activity.getPackageName();
         if (!VIA_CN.equals(packageName) && !VIA_GP.equals(packageName)) {
+            return;
+        }
+        if (!isExportEnabled()) {
+            removePanelButton(activity);
+            log("panel button hidden: export disabled");
+            return;
+        }
+        if (PANEL_BUTTONS.containsKey(activity)) {
             return;
         }
         ViewGroup content = activity.findViewById(android.R.id.content);
@@ -333,7 +317,7 @@ public class Hook implements IXposedHookLoadPackage {
             return;
         }
         final TextView button = new TextView(activity);
-        button.setText("标签");
+        button.setText("\u4e66\u7b7e");
         button.setTextColor(0xffffffff);
         button.setTextSize(12f);
         button.setGravity(Gravity.CENTER);
@@ -348,181 +332,52 @@ public class Hook implements IXposedHookLoadPackage {
             button.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    showOperationPanel(activity);
+                    if (!isExportEnabled()) {
+                        toast(activity, "\u5bfc\u51fa\u5df2\u5173\u95ed");
+                        log("panel export ignored: export disabled");
+                        return;
+                    }
+                    log("panel export clicked");
+                    saveCurrentTabsToBookmarks("\u4e66\u7b7e", activity);
+                    toast(activity, "\u6b63\u5728\u5bfc\u51fa\u4e66\u7b7e");
                 }
             });
-            log("installed operation panel button");
+            log("installed bookmark export button");
         } catch (Throwable t) {
             log("install panel button failed: " + t);
         }
     }
 
-    private static void showOperationPanel(final Activity activity) {
-        final String[] actions = new String[]{
-                "保存当前标签到书签",
-                "创建标签分组",
-                "恢复最近分组",
-                "归档最近分组",
-                "删除最近分组",
-                "刷新标签快照"
-        };
-        new AlertDialog.Builder(activity)
-                .setTitle("Via 标签")
-                .setItems(actions, new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        if (which == 0) {
-                            promptSaveBookmarks(activity);
-                        } else if (which == 1) {
-                            promptCreateGroup(activity);
-                        } else if (which == 2) {
-                            restoreLatestGroupFromPanel(activity);
-                        } else if (which == 3) {
-                            archiveLatestGroupFromPanel(activity);
-                        } else if (which == 4) {
-                            deleteLatestGroupFromPanel(activity);
-                        } else if (which == 5) {
-                            snapshotFromLastTabManager("panel.dump");
-                            toast(activity, "已刷新标签快照");
-                        }
-                    }
-                })
-                .show();
-    }
-
-    private static void promptSaveBookmarks(final Activity activity) {
-        final EditText input = new EditText(activity);
-        input.setSingleLine(true);
-        input.setText(defaultGroupName());
-        input.setHint("书签文件夹名称");
-        new AlertDialog.Builder(activity)
-                .setTitle("保存当前标签")
-                .setView(input)
-                .setPositiveButton("保存", new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        log("panel save clicked");
-                        saveCurrentTabsToBookmarks(textOrDefault(input, "ViaTabsAgent"), activity);
-                        toast(activity, "正在保存到书签");
-                    }
-                })
-                .setNegativeButton("取消", null)
-                .show();
-    }
-
-    private static void promptCreateGroup(final Activity activity) {
-        final LinearLayout layout = new LinearLayout(activity);
-        layout.setOrientation(LinearLayout.VERTICAL);
-        int pad = dp(activity, 16);
-        layout.setPadding(pad, pad / 2, pad, 0);
-
-        final EditText name = new EditText(activity);
-        name.setSingleLine(true);
-        name.setText(defaultGroupName());
-        name.setHint("分组名称");
-        layout.addView(name, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        final EditText color = new EditText(activity);
-        color.setSingleLine(true);
-        color.setText("绿色");
-        color.setHint("颜色：蓝色、绿色、紫色...");
-        layout.addView(color, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        final CheckBox bookmarks = new CheckBox(activity);
-        bookmarks.setText("同时保存到 Via 书签");
-        bookmarks.setChecked(true);
-        layout.addView(bookmarks, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        final CheckBox archived = new CheckBox(activity);
-        archived.setText("创建后归档该分组");
-        archived.setChecked(false);
-        layout.addView(archived, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        new AlertDialog.Builder(activity)
-                .setTitle("创建标签分组")
-                .setView(layout)
-                .setPositiveButton("创建", new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        groupCurrentTabs(null, textOrDefault(name, defaultGroupName()),
-                                textOrDefault(color, "blue"), bookmarks.isChecked(), archived.isChecked(), false,
-                                activity);
-                        toast(activity, "正在创建分组");
-                    }
-                })
-                .setNegativeButton("取消", null)
-                .show();
-    }
-
-    private static void restoreLatestGroupFromPanel(Activity activity) {
+    private static void removePanelButton(Activity activity) {
         try {
-            JSONObject latest = latestTabGroup(false);
-            if (latest == null) {
-                toast(activity, "没有可恢复的分组");
+            View button = PANEL_BUTTONS.remove(activity);
+            if (button == null) {
                 return;
             }
-            restoreTabGroup(latest.optString("groupId"), null, true, -1, null, activity);
-            toast(activity, "正在恢复：" + latest.optString("group", "分组"));
+            ViewGroup parent = button.getParent() instanceof ViewGroup ? (ViewGroup) button.getParent() : null;
+            if (parent != null) {
+                parent.removeView(button);
+            }
         } catch (Throwable t) {
-            log("panel restore latest failed: " + t);
-            toast(activity, "恢复失败");
+            log("remove panel button failed: " + t);
         }
     }
 
-    private static void archiveLatestGroupFromPanel(Activity activity) {
+    private static boolean isExportEnabled() {
+        if (appContext == null) {
+            return true;
+        }
         try {
-            JSONObject latest = latestTabGroup(false);
-            if (latest == null) {
-                toast(activity, "没有可归档的分组");
-                return;
-            }
-            updateTabGroupArchive(latest.optString("groupId"), null, true, activity);
-            toast(activity, "正在归档：" + latest.optString("group", "分组"));
+            Bundle result = appContext.getContentResolver().call(
+                    AgentStore.EXPORT_URI,
+                    ExportProvider.METHOD_GET_EXPORT_ENABLED,
+                    null,
+                    null);
+            return result == null || result.getBoolean(ExportProvider.EXTRA_ENABLED, true);
         } catch (Throwable t) {
-            log("panel archive latest failed: " + t);
-            toast(activity, "归档失败");
+            log("read export switch failed, default enabled: " + t);
+            return true;
         }
-    }
-
-    private static void deleteLatestGroupFromPanel(Activity activity) {
-        try {
-            JSONObject latest = latestTabGroup(true);
-            if (latest == null) {
-                toast(activity, "没有可删除的分组");
-                return;
-            }
-            deleteTabGroup(latest.optString("groupId"), null, activity);
-            toast(activity, "正在删除：" + latest.optString("group", "分组"));
-        } catch (Throwable t) {
-            log("panel delete latest failed: " + t);
-            toast(activity, "删除失败");
-        }
-    }
-
-    private static JSONObject latestTabGroup(boolean includeArchived) throws Exception {
-        JSONArray groups = readTabGroups(new File(agentDir(), "tab-groups.json"));
-        for (int i = groups.length() - 1; i >= 0; i--) {
-            JSONObject group = groups.optJSONObject(i);
-            if (group == null) {
-                continue;
-            }
-            if (includeArchived || !group.optBoolean("archived", false)) {
-                return group;
-            }
-        }
-        return null;
-    }
-
-    private static String defaultGroupName() {
-        return "Via 标签 " + (System.currentTimeMillis() / 1000L);
-    }
-
-    private static String textOrDefault(EditText input, String fallback) {
-        if (input == null || input.getText() == null) {
-            return fallback;
-        }
-        String value = input.getText().toString().trim();
-        return value.length() == 0 ? fallback : value;
     }
 
     private static int dp(Context context, int value) {
@@ -1247,57 +1102,6 @@ public class Hook implements IXposedHookLoadPackage {
         }
     }
 
-    private static void groupCurrentTabs(final String groupId, final String groupName, final String color,
-                                         final boolean saveBookmarks, final boolean archived,
-                                         final boolean closeTabs) {
-        groupCurrentTabs(groupId, groupName, color, saveBookmarks, archived, closeTabs, null);
-    }
-
-    private static void groupCurrentTabs(final String groupId, final String groupName, final String color,
-                                         final boolean saveBookmarks, final boolean archived,
-                                         final boolean closeTabs, final Context uiContext) {
-        final Object manager = lastTabManager;
-        if (manager == null || mainHandler == null) {
-            log("groupCurrentTabs skipped: tab manager not ready");
-            toast(uiContext, "Via 标签管理器未就绪，请先打开一个网页或稍后重试");
-            return;
-        }
-        mainHandler.post(new Runnable() {
-            @Override
-            public void run() {
-                final String safeGroup = groupName == null || groupName.trim().length() == 0
-                        ? "ViaTabs " + System.currentTimeMillis()
-                        : groupName.trim();
-                try {
-                    final List<TabRecord> tabs = snapshotTabRecords(manager);
-                    if (tabs.size() == 0) {
-                        toast(uiContext, "没有读取到可分组的标签");
-                        return;
-                    }
-                    WRITER.execute(new Runnable() {
-                        @Override
-                        public void run() {
-                            try {
-                                BookmarkSaveResult result = saveBookmarks ? saveTabsToViaBookmarks(safeGroup, tabs) : new BookmarkSaveResult();
-                                writeTabGroupSnapshot(groupId, safeGroup, color, archived, closeTabs, tabs, result);
-                                log("grouped tabs: group=" + safeGroup + " tabs=" + tabs.size()
-                                        + " bookmarks=" + saveBookmarks + " inserted=" + result.inserted
-                                        + " archived=" + archived + " closeRequested=" + closeTabs);
-                                toast(uiContext, "已创建分组：" + safeGroup + "（" + tabs.size() + " 个标签）");
-                            } catch (Throwable t) {
-                                log("groupCurrentTabs background failed: " + t);
-                                toast(uiContext, "创建分组失败：" + shortError(t));
-                            }
-                        }
-                    });
-                } catch (Throwable t) {
-                    log("groupCurrentTabs failed: " + t);
-                    toast(uiContext, "创建分组失败：" + shortError(t));
-                }
-            }
-        });
-    }
-
     private static List<TabRecord> snapshotTabRecords(Object manager) {
         ArrayList<TabRecord> records = new ArrayList<TabRecord>();
         Object urls = null;
@@ -1729,7 +1533,9 @@ public class Hook implements IXposedHookLoadPackage {
             root.put("bookmarkError", result.error == null ? JSONObject.NULL : result.error);
             root.put("tabs", toTabRecordArray(tabs));
             long now = System.currentTimeMillis();
-            String baseName = "saved-bookmarks-" + now;
+            int bookmarkCount = countBookmarkableTabs(tabs);
+            String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date(now));
+            String baseName = "\u4e66\u7b7e-" + stamp + "-" + bookmarkCount;
             String htmlFileName = baseName + ".html";
             String htmlPath = writeJsonToDownloadsNow(htmlFileName, toNetscapeBookmarksHtml(folderName, tabs, now / 1000L));
             root.put("htmlExportPath", htmlPath == null ? JSONObject.NULL : "Download/ViaTabsAgent/" + htmlFileName);
@@ -1746,217 +1552,6 @@ public class Hook implements IXposedHookLoadPackage {
         }
     }
 
-    private static void writeTabGroupSnapshot(String requestedGroupId, String groupName, String color,
-                                              boolean archived, boolean closeTabs,
-                                              List<TabRecord> tabs, BookmarkSaveResult result) {
-        try {
-            String groupId = requestedGroupId == null || requestedGroupId.trim().length() == 0
-                    ? UUID.randomUUID().toString()
-                    : requestedGroupId.trim();
-            JSONObject group = baseSnapshot("tabs.group");
-            group.put("groupId", groupId);
-            group.put("group", groupName);
-            group.put("color", normalizeGroupColor(color));
-            group.put("archived", archived);
-            group.put("closeRequested", closeTabs);
-            group.put("folderId", result.folderId == null ? JSONObject.NULL : result.folderId);
-            group.put("inserted", result.inserted);
-            group.put("skipped", result.skipped);
-            group.put("tabCount", tabs.size());
-            group.put("bookmarkableCount", countBookmarkableTabs(tabs));
-            group.put("tabs", toTabRecordArray(tabs));
-
-            File file = new File(agentDir(), "tab-groups.json");
-            JSONArray groups = readTabGroups(file);
-            groups.put(group);
-            JSONObject root = baseSnapshot("tabs.groups");
-            root.put("groups", groups);
-            writeJsonToFileNow(file, root.toString(2));
-        } catch (Throwable t) {
-            log("write tab group snapshot failed: " + t);
-        }
-    }
-
-    private static void restoreTabGroup(final String groupId, final String groupName, final boolean dedupe,
-                                        final int targetIndex, final String targetUrl) {
-        restoreTabGroup(groupId, groupName, dedupe, targetIndex, targetUrl, null);
-    }
-
-    private static void restoreTabGroup(final String groupId, final String groupName, final boolean dedupe,
-                                        final int targetIndex, final String targetUrl, final Context uiContext) {
-        final Object manager = lastTabManager;
-        if (manager == null || mainHandler == null) {
-            log("restoreTabGroup skipped: tab manager not ready");
-            toast(uiContext, "Via 标签管理器未就绪，请先打开一个网页或稍后重试");
-            return;
-        }
-        mainHandler.post(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    JSONObject group = findTabGroup(groupId, groupName);
-                    if (group == null) {
-                        log("restoreTabGroup skipped: group not found");
-                        toast(uiContext, "没有找到可恢复的分组");
-                        return;
-                    }
-                    JSONArray tabs = group.optJSONArray("tabs");
-                    if (tabs == null || tabs.length() == 0) {
-                        log("restoreTabGroup skipped: group has no tabs");
-                        toast(uiContext, "该分组没有可恢复的标签");
-                        return;
-                    }
-                    Object rawCurrent = callTabListMethod(manager);
-                    Set<String> current = new LinkedHashSet<String>(rawCurrent instanceof List
-                            ? normalizeUrls((List<?>) rawCurrent)
-                            : new ArrayList<String>());
-                    int opened = 0;
-                    for (int i = 0; i < tabs.length(); i++) {
-                        JSONObject tab = tabs.optJSONObject(i);
-                        if (tab == null) {
-                            continue;
-                        }
-                        String url = tab.optString("url", "").trim();
-                        if (!matchesRestoreTarget(tab, url, targetIndex, targetUrl)) {
-                            continue;
-                        }
-                        if (!isBookmarkableUrl(url)) {
-                            continue;
-                        }
-                        if (dedupe && current.contains(url)) {
-                            continue;
-                        }
-                        callOpenUrlMethod(manager, url);
-                        current.add(url);
-                        opened++;
-                    }
-                    snapshotFromLastTabManager("tabGroup.restore");
-                    log("restored tab group: groupId=" + group.optString("groupId") + " group="
-                            + group.optString("group") + " opened=" + opened + " dedupe=" + dedupe
-                            + " index=" + targetIndex);
-                    toast(uiContext, opened > 0 ? "已恢复 " + opened + " 个标签" : "没有需要恢复的新标签");
-                } catch (Throwable t) {
-                    log("restoreTabGroup failed: " + t);
-                    toast(uiContext, "恢复失败：" + shortError(t));
-                }
-            }
-        });
-    }
-
-    private static void updateTabGroupArchive(final String groupId, final String groupName, final boolean archived) {
-        updateTabGroupArchive(groupId, groupName, archived, null);
-    }
-
-    private static void updateTabGroupArchive(final String groupId, final String groupName, final boolean archived,
-                                              final Context uiContext) {
-        WRITER.execute(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    File file = new File(agentDir(), "tab-groups.json");
-                    JSONArray groups = readTabGroups(file);
-                    boolean changed = false;
-                    for (int i = 0; i < groups.length(); i++) {
-                        JSONObject group = groups.optJSONObject(i);
-                        if (matchesGroup(group, groupId, groupName)) {
-                            group.put("archived", archived);
-                            group.put("updatedAt", System.currentTimeMillis());
-                            changed = true;
-                        }
-                    }
-                    if (changed) {
-                        writeTabGroups(file, groups);
-                    }
-                    log("archive tab group: changed=" + changed + " archived=" + archived);
-                    toast(uiContext, changed ? (archived ? "已归档分组" : "已取消归档分组") : "没有找到可归档的分组");
-                } catch (Throwable t) {
-                    log("archive tab group failed: " + t);
-                    toast(uiContext, "归档失败：" + shortError(t));
-                }
-            }
-        });
-    }
-
-    private static void deleteTabGroup(final String groupId, final String groupName) {
-        deleteTabGroup(groupId, groupName, null);
-    }
-
-    private static void deleteTabGroup(final String groupId, final String groupName, final Context uiContext) {
-        WRITER.execute(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    File file = new File(agentDir(), "tab-groups.json");
-                    JSONArray groups = readTabGroups(file);
-                    JSONArray kept = new JSONArray();
-                    boolean deleted = false;
-                    for (int i = 0; i < groups.length(); i++) {
-                        JSONObject group = groups.optJSONObject(i);
-                        if (matchesGroup(group, groupId, groupName)) {
-                            deleted = true;
-                            continue;
-                        }
-                        kept.put(groups.get(i));
-                    }
-                    if (deleted) {
-                        writeTabGroups(file, kept);
-                    }
-                    log("delete tab group: deleted=" + deleted);
-                    toast(uiContext, deleted ? "已删除分组" : "没有找到可删除的分组");
-                } catch (Throwable t) {
-                    log("delete tab group failed: " + t);
-                    toast(uiContext, "删除失败：" + shortError(t));
-                }
-            }
-        });
-    }
-
-    private static JSONObject findTabGroup(String groupId, String groupName) throws Exception {
-        JSONArray groups = readTabGroups(new File(agentDir(), "tab-groups.json"));
-        for (int i = groups.length() - 1; i >= 0; i--) {
-            JSONObject group = groups.optJSONObject(i);
-            if (matchesGroup(group, groupId, groupName)) {
-                return group;
-            }
-        }
-        return null;
-    }
-
-    private static boolean matchesGroup(JSONObject group, String groupId, String groupName) {
-        if (group == null) {
-            return false;
-        }
-        String safeId = groupId == null ? "" : groupId.trim();
-        if (safeId.length() > 0 && safeId.equals(group.optString("groupId", ""))) {
-            return true;
-        }
-        String safeName = groupName == null ? "" : groupName.trim();
-        return safeName.length() > 0 && safeName.equals(group.optString("group", ""));
-    }
-
-    private static boolean matchesRestoreTarget(JSONObject tab, String url, int targetIndex, String targetUrl) {
-        String safeUrl = targetUrl == null ? "" : targetUrl.trim();
-        if (safeUrl.length() > 0) {
-            return safeUrl.equals(url);
-        }
-        return targetIndex < 0 || tab.optInt("index", -1) == targetIndex;
-    }
-
-    private static JSONArray readTabGroups(File file) throws Exception {
-        if (!file.exists() || file.length() <= 0 || file.length() > 1024 * 1024) {
-            return new JSONArray();
-        }
-        JSONObject existing = readJsonFile(file);
-        JSONArray oldGroups = existing.optJSONArray("groups");
-        return oldGroups == null ? new JSONArray() : oldGroups;
-    }
-
-    private static void writeTabGroups(File file, JSONArray groups) throws Exception {
-        JSONObject root = baseSnapshot("tabs.groups");
-        root.put("groups", groups);
-        writeJsonToFileNow(file, root.toString(2));
-    }
-
     private static int countBookmarkableTabs(List<TabRecord> tabs) {
         int count = 0;
         for (TabRecord tab : tabs) {
@@ -1965,36 +1560,6 @@ public class Hook implements IXposedHookLoadPackage {
             }
         }
         return count;
-    }
-
-    private static String normalizeGroupColor(String color) {
-        if (color == null || color.trim().length() == 0) {
-            return "blue";
-        }
-        String safe = color.trim().toLowerCase();
-        if ("红色".equals(safe)) {
-            return "red";
-        } else if ("橙色".equals(safe)) {
-            return "orange";
-        } else if ("黄色".equals(safe)) {
-            return "yellow";
-        } else if ("绿色".equals(safe)) {
-            return "green";
-        } else if ("蓝色".equals(safe)) {
-            return "blue";
-        } else if ("紫色".equals(safe)) {
-            return "purple";
-        } else if ("粉色".equals(safe)) {
-            return "pink";
-        } else if ("灰色".equals(safe)) {
-            return "gray";
-        }
-        if ("red".equals(safe) || "orange".equals(safe) || "yellow".equals(safe)
-                || "green".equals(safe) || "blue".equals(safe) || "purple".equals(safe)
-                || "pink".equals(safe) || "gray".equals(safe)) {
-            return safe;
-        }
-        return "blue";
     }
 
     private static JSONObject readJsonFile(File file) throws Exception {

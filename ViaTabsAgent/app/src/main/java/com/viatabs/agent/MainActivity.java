@@ -6,6 +6,7 @@ import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -14,6 +15,7 @@ import android.widget.Toast;
 public class MainActivity extends Activity {
     private TextView logView;
     private TextView statusView;
+    private CheckBox exportSwitch;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -31,10 +33,10 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         TextView info = new TextView(this);
-        info.setText("LSPosed 模块已安装后，请在 LSPosed 中启用并勾选 mark.via / mark.via.gp。\n"
-                + "保存文件目录：/storage/emulated/0/Download/ViaTabsAgent/\n"
-                + "保存文件名：saved-bookmarks-时间戳.json\n"
-                + "日志文件目标路径：/storage/emulated/0/Download/ViaTabsAgent/agent-log.txt");
+        info.setText("LSPosed 模块安装后，请在 LSPosed 中启用并勾选 mark.via / mark.via.gp。\n"
+                + "Via 内只保留导出书签按钮，导出目录：/storage/emulated/0/Download/ViaTabsAgent/\n"
+                + "书签文件名：书签-日期-数量.html / 书签-日期-数量.json\n"
+                + "日志文件：/storage/emulated/0/Download/ViaTabsAgent/agent-log.txt");
         info.setTextSize(14f);
         info.setPadding(0, 18, 0, 18);
         root.addView(info, new LinearLayout.LayoutParams(
@@ -42,8 +44,25 @@ public class MainActivity extends Activity {
 
         statusView = new TextView(this);
         statusView.setTextSize(14f);
-        statusView.setPadding(0, 0, 0, 18);
+        statusView.setPadding(0, 0, 0, 12);
         root.addView(statusView, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        exportSwitch = new CheckBox(this);
+        exportSwitch.setText("启用 Via 内导出书签按钮");
+        exportSwitch.setChecked(AgentStore.isExportEnabled(this));
+        exportSwitch.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                boolean enabled = exportSwitch.isChecked();
+                AgentStore.setExportEnabled(MainActivity.this, enabled);
+                AgentStore.appendLog(MainActivity.this, "导出开关: " + (enabled ? "开启" : "关闭"));
+                refreshStatus();
+                refreshLog();
+                Toast.makeText(MainActivity.this, enabled ? "已启用导出" : "已关闭导出", Toast.LENGTH_SHORT).show();
+            }
+        });
+        root.addView(exportSwitch, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         LinearLayout buttons = new LinearLayout(this);
@@ -111,13 +130,18 @@ public class MainActivity extends Activity {
     }
 
     private void refreshStatus() {
+        boolean enabled = AgentStore.isExportEnabled(this);
         StringBuilder status = new StringBuilder();
-        status.append("模块版本：").append(BuildConfig.VERSION_NAME)
+        status.append("模块版本: ").append(BuildConfig.VERSION_NAME)
                 .append(" (").append(BuildConfig.VERSION_CODE).append(")\n");
-        status.append("mark.via：").append(isPackageInstalled("mark.via") ? "已安装" : "未安装").append("\n");
-        status.append("mark.via.gp：").append(isPackageInstalled("mark.via.gp") ? "已安装" : "未安装").append("\n");
-        status.append("注入状态：看日志中是否出现 module attached in mark.via / mark.via.gp");
+        status.append("mark.via: ").append(isPackageInstalled("mark.via") ? "已安装" : "未安装").append("\n");
+        status.append("mark.via.gp: ").append(isPackageInstalled("mark.via.gp") ? "已安装" : "未安装").append("\n");
+        status.append("导出开关: ").append(enabled ? "开启" : "关闭").append("\n");
+        status.append("注入状态: 查看日志中是否出现 module attached in mark.via / mark.via.gp");
         statusView.setText(status.toString());
+        if (exportSwitch != null) {
+            exportSwitch.setChecked(enabled);
+        }
     }
 
     private boolean isPackageInstalled(String packageName) {
@@ -131,7 +155,7 @@ public class MainActivity extends Activity {
 
     private void runTestExport() {
         try {
-            String fileName = "saved-bookmarks-test-" + System.currentTimeMillis() + ".json";
+            String fileName = "书签-测试-" + System.currentTimeMillis() + "-1.json";
             String payload = "{\n"
                     + "  \"source\": \"module-test-export\",\n"
                     + "  \"message\": \"如果这个文件存在，说明模块 App 写入 Download 正常\"\n"
@@ -151,16 +175,16 @@ public class MainActivity extends Activity {
         String log = AgentStore.readLog(this);
         if (log.length() == 0) {
             log = "暂无日志。\n\n"
-                    + "操作顺序：\n"
-                    + "1. 在 LSPosed 启用 ViaTabsAgent 并勾选 Via。\n"
+                    + "操作顺序:\n"
+                    + "1. 在 LSPosed 启用 ViaTabsAgent，并勾选 Via。\n"
                     + "2. 强制停止 Via 后重新打开。\n"
-                    + "3. 在 Via 内点击“标签”按钮保存。\n"
-                    + "4. 回到这里点“刷新日志”。";
+                    + "3. 在 Via 内点击“书签”按钮导出。\n"
+                    + "4. 回到这里点击“刷新日志”。";
         } else if (!log.contains("module attached in")
                 && !log.contains("loaded in mark.via")
                 && !log.contains("loaded in mark.via.gp")) {
             log = "未检测到 Via 注入日志。\n"
-                    + "如果保存后仍只看到“打开模块界面”，请在 LSPosed 中确认已启用模块、"
+                    + "如果保存后仍只看到“打开模块界面”，请在 LSPosed 中确认已启用模块，"
                     + "作用域勾选 mark.via / mark.via.gp，并强制停止 Via 后重新打开。\n\n"
                     + log;
         }

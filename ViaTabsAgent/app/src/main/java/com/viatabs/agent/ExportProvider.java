@@ -11,11 +11,14 @@ public class ExportProvider extends ContentProvider {
     static final String METHOD_APPEND_LOG = "appendLog";
     static final String METHOD_READ_LOG = "readLog";
     static final String METHOD_CLEAR_LOG = "clearLog";
+    static final String METHOD_GET_EXPORT_ENABLED = "getExportEnabled";
+    static final String METHOD_SET_EXPORT_ENABLED = "setExportEnabled";
     static final String EXTRA_FILE_NAME = "fileName";
     static final String EXTRA_PAYLOAD = "payload";
     static final String EXTRA_MESSAGE = "message";
     static final String EXTRA_PATH = "path";
     static final String EXTRA_LOG = "log";
+    static final String EXTRA_ENABLED = "enabled";
 
     @Override
     public boolean onCreate() {
@@ -42,6 +45,13 @@ public class ExportProvider extends ContentProvider {
                 result.putString(EXTRA_LOG, AgentStore.readLog(getContext()));
             } else if (METHOD_CLEAR_LOG.equals(method)) {
                 AgentStore.clearLog(getContext());
+            } else if (METHOD_GET_EXPORT_ENABLED.equals(method)) {
+                result.putBoolean(EXTRA_ENABLED, AgentStore.isExportEnabled(getContext()));
+            } else if (METHOD_SET_EXPORT_ENABLED.equals(method)) {
+                boolean enabled = extras == null || extras.getBoolean(EXTRA_ENABLED, true);
+                AgentStore.setExportEnabled(getContext(), enabled);
+                AgentStore.appendLog(getContext(), "导出开关: " + (enabled ? "开启" : "关闭"));
+                result.putBoolean(EXTRA_ENABLED, enabled);
             }
         } catch (Throwable t) {
             AgentStore.appendLog(getContext(), method + " 失败: " + t);

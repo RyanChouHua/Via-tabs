@@ -3,6 +3,7 @@ package com.viatabs.agent;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
@@ -26,6 +27,8 @@ final class AgentStore {
     static final String DOWNLOAD_DIR = "ViaTabsAgent";
     static final String BOOKMARKS_FILE = "saved-bookmarks.json";
     static final String LOG_FILE = "agent-log.txt";
+    static final String PREFS = "via_tabs_agent";
+    static final String KEY_EXPORT_ENABLED = "export_enabled";
 
     private static final int MAX_LOG_BYTES = 64 * 1024;
 
@@ -45,8 +48,26 @@ final class AgentStore {
     private static boolean isSupportedExportName(String fileName) {
         return BOOKMARKS_FILE.equals(fileName)
                 || LOG_FILE.equals(fileName)
-                || (fileName != null && fileName.startsWith("saved-bookmarks-")
+                || (fileName != null && fileName.startsWith("书签-")
                 && (fileName.endsWith(".json") || fileName.endsWith(".html")));
+    }
+
+    static boolean isExportEnabled(Context context) {
+        if (context == null) {
+            return true;
+        }
+        SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        return prefs.getBoolean(KEY_EXPORT_ENABLED, true);
+    }
+
+    static void setExportEnabled(Context context, boolean enabled) {
+        if (context == null) {
+            return;
+        }
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_EXPORT_ENABLED, enabled)
+                .apply();
     }
 
     static void appendLog(Context context, String message) {

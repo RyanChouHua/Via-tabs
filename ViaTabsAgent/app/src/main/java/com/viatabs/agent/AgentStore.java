@@ -45,7 +45,8 @@ final class AgentStore {
     private static boolean isSupportedExportName(String fileName) {
         return BOOKMARKS_FILE.equals(fileName)
                 || LOG_FILE.equals(fileName)
-                || (fileName != null && fileName.startsWith("saved-bookmarks-") && fileName.endsWith(".json"));
+                || (fileName != null && fileName.startsWith("saved-bookmarks-")
+                && (fileName.endsWith(".json") || fileName.endsWith(".html")));
     }
 
     static void appendLog(Context context, String message) {
@@ -102,7 +103,7 @@ final class AgentStore {
             deleteLegacyDuplicateFiles(fileName, true);
             ContentValues values = new ContentValues();
             values.put(MediaStore.Downloads.DISPLAY_NAME, fileName);
-            values.put(MediaStore.Downloads.MIME_TYPE, fileName.endsWith(".json") ? "application/json" : "text/plain");
+            values.put(MediaStore.Downloads.MIME_TYPE, mimeTypeFor(fileName));
             values.put(MediaStore.Downloads.RELATIVE_PATH, relativePath);
             values.put(MediaStore.Downloads.IS_PENDING, 1);
             uri = resolver.insert(collection, values);
@@ -125,6 +126,16 @@ final class AgentStore {
         deleteMediaStoreDuplicateExports(resolver, collection, fileName, relativePath, uri);
         deleteLegacyDuplicateFiles(fileName, false);
         return "/storage/emulated/0/Download/" + DOWNLOAD_DIR + "/" + fileName;
+    }
+
+    private static String mimeTypeFor(String fileName) {
+        if (fileName != null && fileName.endsWith(".json")) {
+            return "application/json";
+        }
+        if (fileName != null && fileName.endsWith(".html")) {
+            return "text/html";
+        }
+        return "text/plain";
     }
 
     private static Uri findMediaStoreExport(ContentResolver resolver, Uri collection,

@@ -36,6 +36,7 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
@@ -694,6 +695,7 @@ public class Hook implements IXposedHookLoadPackage {
                 && !name.startsWith("okhttp3.")
                 && !name.startsWith("okio.")
                 && !name.startsWith("org.")
+                && !name.startsWith("com.google.")
                 && !name.startsWith("com.viatabs.");
     }
 
@@ -832,7 +834,7 @@ public class Hook implements IXposedHookLoadPackage {
             }
             candidate.setAccessible(true);
             Object result = candidate.invoke(manager);
-            if (looksLikeUrlList(result)) {
+            if (looksLikeTabList(result)) {
                 tabListMethod = candidate;
                 return result;
             }
@@ -864,7 +866,7 @@ public class Hook implements IXposedHookLoadPackage {
         throw new IllegalStateException("open tab method not ready");
     }
 
-    private static boolean looksLikeUrlList(Object value) {
+    private static boolean looksLikeTabList(Object value) {
         if (!(value instanceof List)) {
             return false;
         }
@@ -878,7 +880,7 @@ public class Hook implements IXposedHookLoadPackage {
             if (item == null) {
                 continue;
             }
-            if (isMeaningfulUrl(String.valueOf(item))) {
+            if (isMeaningfulUrl(String.valueOf(item)) || tabRecordFromValue(item, i) != null) {
                 return true;
             }
         }
@@ -964,7 +966,7 @@ public class Hook implements IXposedHookLoadPackage {
 
             Object list = bundle.get("LIST");
             if (list instanceof List) {
-                root.put("tabs", toUrlArray((List<?>) list));
+                root.put("tabs", toTabRecordArray(tabRecordsFromList((List<?>) list)));
             } else if (list instanceof Parcelable[]) {
                 root.put("tabs", toBundleUrlArray((Parcelable[]) list));
             } else if (list instanceof Object[]) {
@@ -982,10 +984,11 @@ public class Hook implements IXposedHookLoadPackage {
             if (current != null) {
                 root.put("current", current.intValue());
             }
-            root.put("tabs", toUrlArray(urls));
+            List<TabRecord> records = tabRecordsFromList(urls);
+            root.put("tabs", toTabRecordArray(records));
             boolean wrote = writeJson(root);
             if (wrote && isTabManagerSource(source)) {
-                persistAgentSession(source, urls);
+                persistAgentSession(source, tabRecordUrls(records));
             }
         } catch (Throwable t) {
             log("write tabs snapshot failed: " + t);
@@ -1303,25 +1306,199 @@ public class Hook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             log("snapshot tab records failed to read list: " + t);
         }
-        List<String> cleanUrls = urls instanceof List ? normalizeUrls((List<?>) urls) : new ArrayList<String>();
+        List<?> rawList = urls instanceof List ? (List<?>) urls : new ArrayList<Object>();
         Object rawTabs = null;
         try {
             rawTabs = XposedHelpers.getObjectField(manager, "c");
         } catch (Throwable ignored) {
         }
         List<?> tabs = rawTabs instanceof List ? (List<?>) rawTabs : null;
-        for (int i = 0; i < cleanUrls.size(); i++) {
-            String url = cleanUrls.get(i);
-            String title = null;
-            if (tabs != null && i < tabs.size()) {
-                title = titleFromViaTab(tabs.get(i));
+        for (int i = 0; i < rawList.size(); i++) {
+            Object value = rawList.get(i);
+            TabRecord record = tabRecordFromValue(value, i);
+            if (record == null && tabs != null && i < tabs.size()) {
+                record = tabRecordFromValue(tabs.get(i), i);
+            } else if (record != null && (record.title == null || record.title.trim().length() == 0)
+                    && tabs != null && i < tabs.size()) {
+                String title = titleFromViaTab(tabs.get(i));
+                if (title != null && title.trim().length() > 0) {
+                    record = new TabRecord(record.index, title.trim(), record.url);
+                }
             }
-            if (title == null || title.trim().length() == 0) {
-                title = titleFromUrl(url);
+            if (record != null && isMeaningfulUrl(record.url)) {
+                records.add(new TabRecord(records.size(), record.title, record.url));
             }
-            records.add(new TabRecord(i, title, url));
+        }
+        log("snapshot tab records parsed: raw=" + rawList.size() + " tabs=" + records.size());
+        return records;
+    }
+
+    private static List<TabRecord> tabRecordsFromList(List<?> values) {
+        ArrayList<TabRecord> records = new ArrayList<TabRecord>();
+        if (values == null) {
+            return records;
+        }
+        LinkedHashSet<String> seen = new LinkedHashSet<String>();
+        for (int i = 0; i < values.size(); i++) {
+            TabRecord record = tabRecordFromValue(values.get(i), i);
+            if (record == null || !isMeaningfulUrl(record.url) || !seen.add(record.url)) {
+                continue;
+            }
+            records.add(new TabRecord(records.size(), record.title, record.url));
         }
         return records;
+    }
+
+    private static List<String> tabRecordUrls(List<TabRecord> records) {
+        ArrayList<String> urls = new ArrayList<String>();
+        if (records == null) {
+            return urls;
+        }
+        for (TabRecord record : records) {
+            if (record != null && isMeaningfulUrl(record.url)) {
+                urls.add(record.url);
+            }
+        }
+        return urls;
+    }
+
+    private static TabRecord tabRecordFromValue(Object value, int index) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof String) {
+            String url = ((String) value).trim();
+            return isMeaningfulUrl(url) ? new TabRecord(index, titleFromUrl(url), url) : null;
+        }
+        if (value instanceof Bundle) {
+            return tabRecordFromBundle((Bundle) value, index);
+        }
+        String direct = String.valueOf(value).trim();
+        if (isMeaningfulUrl(direct)) {
+            return new TabRecord(index, titleFromUrl(direct), direct);
+        }
+        String url = firstMeaningfulStringFromObject(value, true);
+        if (!isMeaningfulUrl(url)) {
+            return null;
+        }
+        String title = titleFromViaTab(value);
+        if (title == null || title.trim().length() == 0 || isMeaningfulUrl(title)) {
+            title = firstMeaningfulStringFromObject(value, false);
+        }
+        if (title == null || title.trim().length() == 0 || isMeaningfulUrl(title)) {
+            title = titleFromUrl(url);
+        }
+        return new TabRecord(index, title.trim(), url.trim());
+    }
+
+    private static TabRecord tabRecordFromBundle(Bundle bundle, int index) {
+        String url = firstString(bundle, "url", "URL", "u", "link", "href");
+        if (!isMeaningfulUrl(url)) {
+            for (String key : bundle.keySet()) {
+                Object value = bundle.get(key);
+                if (value instanceof String && isMeaningfulUrl((String) value)) {
+                    url = (String) value;
+                    break;
+                }
+            }
+        }
+        if (!isMeaningfulUrl(url)) {
+            return null;
+        }
+        String title = firstString(bundle, "title", "TITLE", "name", "label");
+        if (title == null || title.trim().length() == 0 || isMeaningfulUrl(title)) {
+            title = titleFromUrl(url);
+        }
+        return new TabRecord(index, title.trim(), url.trim());
+    }
+
+    private static String firstString(Bundle bundle, String... keys) {
+        for (String key : keys) {
+            try {
+                String value = bundle.getString(key);
+                if (value != null && value.trim().length() > 0) {
+                    return value.trim();
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
+    }
+
+    private static String firstMeaningfulStringFromObject(Object value, boolean wantUrl) {
+        String fromFields = firstMeaningfulStringFromFields(value, wantUrl);
+        if (fromFields != null) {
+            return fromFields;
+        }
+        return firstMeaningfulStringFromMethods(value, wantUrl);
+    }
+
+    private static String firstMeaningfulStringFromFields(Object value, boolean wantUrl) {
+        Class<?> clazz = value.getClass();
+        while (clazz != null && clazz != Object.class) {
+            Field[] fields = clazz.getDeclaredFields();
+            for (Field field : fields) {
+                if (Modifier.isStatic(field.getModifiers())) {
+                    continue;
+                }
+                try {
+                    field.setAccessible(true);
+                    Object fieldValue = field.get(value);
+                    String found = stringFromPossibleTabValue(fieldValue, wantUrl);
+                    if (found != null) {
+                        return found;
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            clazz = clazz.getSuperclass();
+        }
+        return null;
+    }
+
+    private static String firstMeaningfulStringFromMethods(Object value, boolean wantUrl) {
+        Method[] methods = value.getClass().getDeclaredMethods();
+        for (Method method : methods) {
+            if (Modifier.isStatic(method.getModifiers())
+                    || method.getParameterTypes().length != 0
+                    || method.getReturnType() == Void.TYPE
+                    || (!String.class.isAssignableFrom(method.getReturnType())
+                    && !Bundle.class.isAssignableFrom(method.getReturnType())
+                    && !WebView.class.isAssignableFrom(method.getReturnType()))) {
+                continue;
+            }
+            try {
+                method.setAccessible(true);
+                Object result = method.invoke(value);
+                String found = stringFromPossibleTabValue(result, wantUrl);
+                if (found != null) {
+                    return found;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
+    }
+
+    private static String stringFromPossibleTabValue(Object value, boolean wantUrl) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof String) {
+            String safe = ((String) value).trim();
+            boolean url = isMeaningfulUrl(safe);
+            if ((wantUrl && url) || (!wantUrl && !url && safe.length() > 0 && safe.length() < 200)) {
+                return safe;
+            }
+        } else if (value instanceof Bundle) {
+            TabRecord record = tabRecordFromBundle((Bundle) value, 0);
+            if (record != null) {
+                return wantUrl ? record.url : record.title;
+            }
+        } else if (value instanceof WebView) {
+            return wantUrl ? safeWebViewUrl((WebView) value) : safeWebViewTitle((WebView) value);
+        }
+        return null;
     }
 
     private static List<TabRecord> readFallbackTabRecords() {
@@ -1551,9 +1728,18 @@ public class Hook implements IXposedHookLoadPackage {
             root.put("skipped", result.skipped);
             root.put("bookmarkError", result.error == null ? JSONObject.NULL : result.error);
             root.put("tabs", toTabRecordArray(tabs));
-            String fileName = "saved-bookmarks-" + System.currentTimeMillis() + ".json";
+            long now = System.currentTimeMillis();
+            String baseName = "saved-bookmarks-" + now;
+            String htmlFileName = baseName + ".html";
+            String htmlPath = writeJsonToDownloadsNow(htmlFileName, toNetscapeBookmarksHtml(folderName, tabs, now / 1000L));
+            root.put("htmlExportPath", htmlPath == null ? JSONObject.NULL : "Download/ViaTabsAgent/" + htmlFileName);
+            String fileName = baseName + ".json";
             root.put("exportPath", "Download/ViaTabsAgent/" + fileName);
-            return writeJsonToDownloadsNow(fileName, root.toString(2));
+            String jsonPath = writeJsonToDownloadsNow(fileName, root.toString(2));
+            if (htmlPath != null) {
+                log("wrote bookmark import html: " + htmlPath);
+            }
+            return jsonPath;
         } catch (Throwable t) {
             log("write bookmark save snapshot failed: " + t);
             return null;
@@ -1839,6 +2025,62 @@ public class Hook implements IXposedHookLoadPackage {
             tabs.put(tab);
         }
         return tabs;
+    }
+
+    private static String toNetscapeBookmarksHtml(String folderName, List<TabRecord> tabs, long addDate) {
+        String safeFolder = folderName == null || folderName.trim().length() == 0
+                ? "ViaTabsAgent"
+                : folderName.trim();
+        StringBuilder html = new StringBuilder();
+        html.append("<!DOCTYPE NETSCAPE-Bookmark-file-1>\n");
+        html.append("<!-- This is an automatically generated file.\n");
+        html.append("     It will be read and overwritten.\n");
+        html.append("     DO NOT EDIT! -->\n");
+        html.append("<META HTTP-EQUIV=\"Content-Type\" CONTENT=\"text/html; charset=UTF-8\">\n");
+        html.append("<TITLE>Bookmarks</TITLE>\n");
+        html.append("<H1>Bookmarks</H1>\n");
+        html.append("<DL><p>\n");
+        html.append("  <DT><H3 ADD_DATE=\"").append(addDate).append("\">")
+                .append(escapeBookmarkHtml(safeFolder)).append("</H3>\n");
+        html.append("  <DL><p>\n");
+        if (tabs != null) {
+            for (TabRecord tab : tabs) {
+                if (tab == null || !isBookmarkableUrl(tab.url)) {
+                    continue;
+                }
+                String title = tab.title == null || tab.title.trim().length() == 0
+                        ? titleFromUrl(tab.url)
+                        : tab.title.trim();
+                html.append("    <DT><A HREF=\"").append(escapeBookmarkHtml(tab.url))
+                        .append("\" ADD_DATE=\"").append(addDate).append("\">")
+                        .append(escapeBookmarkHtml(title)).append("</A>\n");
+            }
+        }
+        html.append("  </DL><p>\n");
+        html.append("</DL><p>\n");
+        return html.toString();
+    }
+
+    private static String escapeBookmarkHtml(String value) {
+        if (value == null) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder(value.length());
+        for (int i = 0; i < value.length(); i++) {
+            char ch = value.charAt(i);
+            if (ch == '&') {
+                out.append("&amp;");
+            } else if (ch == '<') {
+                out.append("&lt;");
+            } else if (ch == '>') {
+                out.append("&gt;");
+            } else if (ch == '"') {
+                out.append("&quot;");
+            } else {
+                out.append(ch);
+            }
+        }
+        return out.toString();
     }
 
     private static JSONObject baseSnapshot(String source) throws Exception {

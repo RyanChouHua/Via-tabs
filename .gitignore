@@ -22,3 +22,12 @@ tools/lspatch/*.jar
 *.png
 *.log
 *.tmp
+saved-bookmarks.json
+via-*.json
+via-*.html
+
+# IDE / OS noise
+.idea/
+*.iml
+.DS_Store
+Thumbs.db

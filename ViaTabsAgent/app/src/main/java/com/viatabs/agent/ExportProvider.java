@@ -11,6 +11,7 @@ public class ExportProvider extends ContentProvider {
     static final String METHOD_APPEND_LOG = "appendLog";
     static final String METHOD_READ_LOG = "readLog";
     static final String METHOD_CLEAR_LOG = "clearLog";
+    static final String METHOD_READ_EXPORT_FILE = "readExportFile";
     static final String METHOD_GET_LAST_RESULT = "getLastResult";
     static final String METHOD_SET_LAST_RESULT = "setLastResult";
     static final String METHOD_GET_EXPORT_ENABLED = "getExportEnabled";
@@ -19,6 +20,7 @@ public class ExportProvider extends ContentProvider {
     static final String METHOD_SET_TAB_EXPORT_ENABLED = "setTabExportEnabled";
     static final String METHOD_SET_BOOKMARK_IMPORT_ENABLED = "setBookmarkImportEnabled";
     static final String METHOD_SET_DOMAIN_GROUP_ENABLED = "setDomainGroupEnabled";
+    static final String METHOD_SET_PANEL_COLOR = "setPanelColor";
     static final String EXTRA_FILE_NAME = "fileName";
     static final String EXTRA_PAYLOAD = "payload";
     static final String EXTRA_MESSAGE = "message";
@@ -30,6 +32,9 @@ public class ExportProvider extends ContentProvider {
     static final String EXTRA_TAB_EXPORT_ENABLED = "tabExportEnabled";
     static final String EXTRA_BOOKMARK_IMPORT_ENABLED = "bookmarkImportEnabled";
     static final String EXTRA_DOMAIN_GROUP_ENABLED = "domainGroupEnabled";
+    static final String EXTRA_PANEL_COLOR = "panelColor";
+    static final String EXTRA_PANEL_ALPHA = "panelAlpha";
+    static final String EXTRA_PANEL_SIZE = "panelSize";
 
     @Override
     public boolean onCreate() {
@@ -56,6 +61,9 @@ public class ExportProvider extends ContentProvider {
                 result.putString(EXTRA_LOG, AgentStore.readLog(getContext()));
             } else if (METHOD_CLEAR_LOG.equals(method)) {
                 AgentStore.clearLog(getContext());
+            } else if (METHOD_READ_EXPORT_FILE.equals(method)) {
+                String fileName = extras == null ? null : extras.getString(EXTRA_FILE_NAME);
+                result.putString(EXTRA_PAYLOAD, AgentStore.readExportText(getContext(), fileName));
             } else if (METHOD_GET_LAST_RESULT.equals(method)) {
                 result.putString(EXTRA_RESULT, AgentStore.getLastSaveResult(getContext()));
             } else if (METHOD_SET_LAST_RESULT.equals(method)) {
@@ -73,6 +81,9 @@ public class ExportProvider extends ContentProvider {
                 result.putBoolean(EXTRA_TAB_EXPORT_ENABLED, AgentStore.isTabExportEnabled(getContext()));
                 result.putBoolean(EXTRA_BOOKMARK_IMPORT_ENABLED, AgentStore.isBookmarkImportEnabled(getContext()));
                 result.putBoolean(EXTRA_DOMAIN_GROUP_ENABLED, AgentStore.isDomainGroupEnabled(getContext()));
+                result.putString(EXTRA_PANEL_COLOR, AgentStore.getPanelColor(getContext()));
+                result.putInt(EXTRA_PANEL_ALPHA, AgentStore.getPanelAlpha(getContext()));
+                result.putInt(EXTRA_PANEL_SIZE, AgentStore.getPanelSize(getContext()));
             } else if (METHOD_SET_TAB_EXPORT_ENABLED.equals(method)) {
                 boolean enabled = extras == null || extras.getBoolean(EXTRA_TAB_EXPORT_ENABLED, true);
                 AgentStore.setTabExportEnabled(getContext(), enabled);
@@ -88,6 +99,12 @@ public class ExportProvider extends ContentProvider {
                 AgentStore.setDomainGroupEnabled(getContext(), enabled);
                 AgentStore.appendLog(getContext(), "按域名整理: " + (enabled ? "开启" : "关闭"));
                 result.putBoolean(EXTRA_DOMAIN_GROUP_ENABLED, enabled);
+            } else if (METHOD_SET_PANEL_COLOR.equals(method)) {
+                String color = extras == null ? AgentStore.PANEL_COLOR_BLUE
+                        : extras.getString(EXTRA_PANEL_COLOR, AgentStore.PANEL_COLOR_BLUE);
+                AgentStore.setPanelColor(getContext(), color);
+                AgentStore.appendLog(getContext(), "悬浮按钮配色: " + color);
+                result.putString(EXTRA_PANEL_COLOR, AgentStore.getPanelColor(getContext()));
             }
         } catch (Throwable t) {
             AgentStore.appendLog(getContext(), method + " 失败: " + t);

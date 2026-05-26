@@ -12,6 +12,9 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -20,6 +23,7 @@ import android.os.Looper;
 import android.os.Parcelable;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.WebView;
@@ -93,6 +97,15 @@ public class Hook implements IXposedHookLoadPackage {
     private static final String ACTION_CLOSE_VIA = "com.viatabs.agent.CLOSE_VIA";
     private static final String ACTION_RESTORE_AGENT_SESSION = "com.viatabs.agent.RESTORE_AGENT_SESSION";
     private static final String ACTION_SAVE_TABS_TO_BOOKMARKS = "com.viatabs.agent.SAVE_TABS_TO_BOOKMARKS";
+    static final String ACTION_IMPORT_EXPORT_GROUPS = "com.viatabs.agent.IMPORT_EXPORT_GROUPS";
+    static final String EXTRA_JSON_NAMES = "jsonNames";
+    static final String EXTRA_HTML_NAMES = "htmlNames";
+    private static final int PANEL_STATE_DEFAULT = 0;
+    private static final int PANEL_STATE_READING = 1;
+    private static final int PANEL_STATE_CONFIRM = 2;
+    private static final int PANEL_STATE_SAVING = 3;
+    private static final int PANEL_STATE_DONE = 4;
+    private static final int PANEL_STATE_FAILED = 5;
 
     @Override
     public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lpparam) {
@@ -192,6 +205,7 @@ public class Hook implements IXposedHookLoadPackage {
         filter.addAction(ACTION_CLOSE_VIA);
         filter.addAction(ACTION_RESTORE_AGENT_SESSION);
         filter.addAction(ACTION_SAVE_TABS_TO_BOOKMARKS);
+        filter.addAction(ACTION_IMPORT_EXPORT_GROUPS);
 
         BroadcastReceiver receiver = new BroadcastReceiver() {
             @Override
@@ -221,6 +235,8 @@ public class Hook implements IXposedHookLoadPackage {
                     }
                     String folder = intent.getStringExtra("folder");
                     saveCurrentTabsToBookmarks(folder == null ? "书签" : folder);
+                } else if (ACTION_IMPORT_EXPORT_GROUPS.equals(action)) {
+                    importExportGroups(intent);
                 }
             }
         };
@@ -315,40 +331,146 @@ public class Hook implements IXposedHookLoadPackage {
             return;
         }
         if (PANEL_BUTTONS.containsKey(activity)) {
+            View existing = PANEL_BUTTONS.get(activity);
+            if (existing instanceof TextView) {
+                applyPanelButtonStyle((TextView) existing, PANEL_STATE_DEFAULT);
+            }
             return;
         }
         ViewGroup content = activity.findViewById(android.R.id.content);
         if (content == null) {
             return;
         }
+        ExportSettings settings = readExportSettings();
         final TextView button = new TextView(activity);
-        button.setText("\u4e66\u7b7e");
-        button.setTextColor(0xffffffff);
-        button.setTextSize(12f);
+        applyPanelButtonStyle(button, PANEL_STATE_DEFAULT);
         button.setGravity(Gravity.CENTER);
-        button.setBackgroundColor(0xcc1f6feb);
-        button.setPadding(dp(activity, 10), dp(activity, 8), dp(activity, 10), dp(activity, 8));
-        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(dp(activity, 58), dp(activity, 42));
+        button.setTypeface(Typeface.DEFAULT_BOLD);
+        button.setPadding(dp(activity, 2), dp(activity, 2), dp(activity, 2), dp(activity, 2));
+        if (Build.VERSION.SDK_INT >= 21) {
+            button.setElevation(dp(activity, 6));
+        }
+        button.setContentDescription("保存当前标签页到书签");
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                dp(activity, settings.panelSize), dp(activity, settings.panelSize));
         params.gravity = Gravity.RIGHT | Gravity.CENTER_VERTICAL;
-        params.rightMargin = dp(activity, 8);
+        params.rightMargin = dp(activity, 10);
         try {
             content.addView(button, params);
             PANEL_BUTTONS.put(activity, button);
+            restorePanelPosition(button, activity);
             button.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    if (!isExportEnabled()) {
-                        toast(activity, "\u5bfc\u51fa\u5df2\u5173\u95ed");
-                        log("panel export ignored: export disabled");
-                        return;
-                    }
-                    log("panel export clicked");
-                    previewCurrentTabsToBookmarks(button, activity);
+                    handlePanelButtonClick(button, activity);
                 }
             });
-            log("installed bookmark export button");
+            button.setOnTouchListener(new View.OnTouchListener() {
+                private float downRawX;
+                private float downRawY;
+                private float startX;
+                private float startY;
+                private boolean dragging;
+
+                @Override
+                public boolean onTouch(View v, MotionEvent event) {
+                    if (!button.isEnabled()) {
+                        return false;
+                    }
+                    switch (event.getActionMasked()) {
+                        case MotionEvent.ACTION_DOWN:
+                            downRawX = event.getRawX();
+                            downRawY = event.getRawY();
+                            startX = button.getX();
+                            startY = button.getY();
+                            dragging = false;
+                            return true;
+                        case MotionEvent.ACTION_MOVE:
+                            float dx = event.getRawX() - downRawX;
+                            float dy = event.getRawY() - downRawY;
+                            if (!dragging && Math.hypot(dx, dy) > dp(activity, 6)) {
+                                dragging = true;
+                            }
+                            if (dragging) {
+                                movePanelButton(button, startX + dx, startY + dy);
+                            }
+                            return true;
+                        case MotionEvent.ACTION_UP:
+                        case MotionEvent.ACTION_CANCEL:
+                            if (dragging) {
+                                savePanelPosition(button, activity);
+                            } else if (event.getActionMasked() == MotionEvent.ACTION_UP) {
+                                button.performClick();
+                            }
+                            return true;
+                        default:
+                            return false;
+                    }
+                }
+            });
+            log("installed draggable bookmark count button");
         } catch (Throwable t) {
             log("install panel button failed: " + t);
+        }
+    }
+
+    private static void handlePanelButtonClick(TextView button, Activity activity) {
+        if (!isExportEnabled()) {
+            toast(activity, "导出已关闭");
+            log("panel export ignored: export disabled");
+            return;
+        }
+        log("panel export clicked");
+        previewCurrentTabsToBookmarks(button, activity);
+    }
+
+    private static void restorePanelPosition(final TextView button, final Activity activity) {
+        if (button == null || activity == null) {
+            return;
+        }
+        button.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    float savedX = AgentStore.getPanelX(activity, activity.getPackageName());
+                    float savedY = AgentStore.getPanelY(activity, activity.getPackageName());
+                    if (Float.isNaN(savedX) || Float.isNaN(savedY)) {
+                        View parent = button.getParent() instanceof View ? (View) button.getParent() : null;
+                        if (parent != null) {
+                            savedX = parent.getWidth() - button.getWidth() - dp(activity, 10);
+                            savedY = (parent.getHeight() - button.getHeight()) * 0.58f;
+                        }
+                    }
+                    if (!Float.isNaN(savedX) && !Float.isNaN(savedY)) {
+                        movePanelButton(button, savedX, savedY);
+                    }
+                } catch (Throwable t) {
+                    log("restore panel position failed: " + t);
+                }
+            }
+        });
+    }
+
+    private static void movePanelButton(TextView button, float x, float y) {
+        View parent = button.getParent() instanceof View ? (View) button.getParent() : null;
+        if (parent == null) {
+            button.setX(x);
+            button.setY(y);
+            return;
+        }
+        float maxX = Math.max(0, parent.getWidth() - button.getWidth());
+        float maxY = Math.max(0, parent.getHeight() - button.getHeight());
+        button.setX(Math.max(0, Math.min(x, maxX)));
+        button.setY(Math.max(0, Math.min(y, maxY)));
+    }
+
+    private static void savePanelPosition(TextView button, Activity activity) {
+        try {
+            AgentStore.setPanelPosition(activity, activity.getPackageName(), button.getX(), button.getY());
+            log("saved panel position: package=" + activity.getPackageName()
+                    + " x=" + Math.round(button.getX()) + " y=" + Math.round(button.getY()));
+        } catch (Throwable t) {
+            log("save panel position failed: " + t);
         }
     }
 
@@ -373,7 +495,8 @@ public class Hook implements IXposedHookLoadPackage {
 
     private static ExportSettings readExportSettings() {
         if (appContext == null) {
-            return new ExportSettings(true, true, true, false);
+            return new ExportSettings(true, true, true, false,
+                    AgentStore.PANEL_COLOR_BLUE, 92, 40);
         }
         try {
             Bundle result = appContext.getContentResolver().call(
@@ -382,16 +505,21 @@ public class Hook implements IXposedHookLoadPackage {
                     null,
                     null);
             if (result == null) {
-                return new ExportSettings(true, true, true, false);
+                return new ExportSettings(true, true, true, false,
+                        AgentStore.PANEL_COLOR_BLUE, 92, 40);
             }
             return new ExportSettings(
                     result.getBoolean(ExportProvider.EXTRA_PANEL_ENABLED, true),
-                    result.getBoolean(ExportProvider.EXTRA_TAB_EXPORT_ENABLED, true),
+                    true,
                     result.getBoolean(ExportProvider.EXTRA_BOOKMARK_IMPORT_ENABLED, true),
-                    result.getBoolean(ExportProvider.EXTRA_DOMAIN_GROUP_ENABLED, false));
+                    result.getBoolean(ExportProvider.EXTRA_DOMAIN_GROUP_ENABLED, false),
+                    result.getString(ExportProvider.EXTRA_PANEL_COLOR, AgentStore.PANEL_COLOR_BLUE),
+                    result.getInt(ExportProvider.EXTRA_PANEL_ALPHA, 92),
+                    result.getInt(ExportProvider.EXTRA_PANEL_SIZE, 40));
         } catch (Throwable t) {
             log("read export settings failed, default enabled: " + t);
-            return new ExportSettings(true, true, true, false);
+            return new ExportSettings(true, true, true, false,
+                    AgentStore.PANEL_COLOR_BLUE, 92, 40);
         }
     }
 
@@ -400,18 +528,105 @@ public class Hook implements IXposedHookLoadPackage {
         final boolean tabExportEnabled;
         final boolean bookmarkImportEnabled;
         final boolean domainGroupEnabled;
+        final String panelColor;
+        final int panelAlpha;
+        final int panelSize;
 
         ExportSettings(boolean panelEnabled, boolean tabExportEnabled, boolean bookmarkImportEnabled,
-                       boolean domainGroupEnabled) {
+                       boolean domainGroupEnabled, String panelColor, int panelAlpha, int panelSize) {
             this.panelEnabled = panelEnabled;
-            this.tabExportEnabled = tabExportEnabled;
+            this.tabExportEnabled = true;
             this.bookmarkImportEnabled = bookmarkImportEnabled;
             this.domainGroupEnabled = domainGroupEnabled;
+            this.panelColor = panelColor == null ? AgentStore.PANEL_COLOR_BLUE : panelColor;
+            this.panelAlpha = Math.max(20, Math.min(100, panelAlpha));
+            this.panelSize = Math.max(28, Math.min(56, panelSize));
         }
     }
 
     private static int dp(Context context, int value) {
         return (int) (value * context.getResources().getDisplayMetrics().density + 0.5f);
+    }
+
+    private static void applyPanelButtonStyle(TextView button, int state) {
+        if (button == null) {
+            return;
+        }
+        Context context = button.getContext();
+        ExportSettings settings = readExportSettings();
+        int[] palette = panelPalette(settings);
+        int fill;
+        int stroke;
+        switch (state) {
+            case PANEL_STATE_READING:
+                fill = Color.rgb(71, 85, 105);
+                stroke = Color.rgb(100, 116, 139);
+                break;
+            case PANEL_STATE_CONFIRM:
+                fill = palette[0];
+                stroke = palette[1];
+                break;
+            case PANEL_STATE_SAVING:
+                fill = palette[2];
+                stroke = palette[1];
+                break;
+            case PANEL_STATE_DONE:
+                fill = Color.rgb(5, 150, 105);
+                stroke = Color.rgb(110, 231, 183);
+                break;
+            case PANEL_STATE_FAILED:
+                fill = Color.rgb(220, 38, 38);
+                stroke = Color.rgb(252, 165, 165);
+                break;
+            case PANEL_STATE_DEFAULT:
+            default:
+                fill = palette[0];
+                stroke = palette[1];
+                break;
+        }
+        GradientDrawable background = new GradientDrawable();
+        background.setShape(GradientDrawable.OVAL);
+        background.setColor(applyAlpha(fill, settings.panelAlpha));
+        background.setStroke(dp(context, 2), stroke);
+        button.setBackground(background);
+        button.setText("");
+        button.setTextSize(1f);
+        button.setTextColor(Color.TRANSPARENT);
+        button.setLineSpacing(0f, 0.88f);
+    }
+
+    private static int[] panelPalette(ExportSettings settings) {
+        String color = settings == null ? AgentStore.PANEL_COLOR_BLUE : settings.panelColor;
+        if (AgentStore.PANEL_COLOR_WHITE.equals(color)) {
+            return new int[]{Color.WHITE, Color.rgb(203, 213, 225), Color.rgb(241, 245, 249), Color.rgb(15, 23, 42)};
+        }
+        if (AgentStore.PANEL_COLOR_TRANSPARENT.equals(color)) {
+            return new int[]{Color.WHITE, Color.rgb(148, 163, 184), Color.rgb(226, 232, 240), Color.rgb(15, 23, 42)};
+        }
+        if (AgentStore.PANEL_COLOR_GREEN.equals(color)) {
+            return new int[]{Color.rgb(5, 150, 105), Color.rgb(110, 231, 183), Color.rgb(4, 120, 87), Color.WHITE};
+        }
+        if (AgentStore.PANEL_COLOR_PURPLE.equals(color)) {
+            return new int[]{Color.rgb(124, 58, 237), Color.rgb(196, 181, 253), Color.rgb(91, 33, 182), Color.WHITE};
+        }
+        if (AgentStore.PANEL_COLOR_DARK.equals(color)) {
+            return new int[]{Color.rgb(30, 41, 59), Color.rgb(148, 163, 184), Color.rgb(15, 23, 42), Color.WHITE};
+        }
+        if (AgentStore.PANEL_COLOR_ROSE.equals(color)) {
+            return new int[]{Color.rgb(225, 29, 72), Color.rgb(253, 164, 175), Color.rgb(190, 18, 60), Color.WHITE};
+        }
+        if (AgentStore.PANEL_COLOR_ORANGE.equals(color)) {
+            return new int[]{Color.rgb(234, 88, 12), Color.rgb(253, 186, 116), Color.rgb(194, 65, 12), Color.WHITE};
+        }
+        if (AgentStore.PANEL_COLOR_CYAN.equals(color)) {
+            return new int[]{Color.rgb(8, 145, 178), Color.rgb(103, 232, 249), Color.rgb(14, 116, 144), Color.WHITE};
+        }
+        return new int[]{Color.rgb(37, 99, 235), Color.rgb(191, 219, 254), Color.rgb(30, 64, 175), Color.WHITE};
+    }
+
+    private static int applyAlpha(int color, int alphaPercent) {
+        int alpha = Math.max(20, Math.min(100, alphaPercent)) * 255 / 100;
+        return Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color));
     }
 
     private static void toast(final Context context, final String message) {
@@ -1126,7 +1341,7 @@ public class Hook implements IXposedHookLoadPackage {
         String message = "当前捕获标签: " + tabs.size()
                 + "\n可保存标签: " + batch.bookmarkCount
                 + "\n文件夹: " + batch.folderName
-                + "\n标签导出: " + enabledText(settings.tabExportEnabled)
+                + "\nJSON 保存: 默认"
                 + "\n导入书签: " + enabledText(settings.bookmarkImportEnabled)
                 + "\n按域名整理: " + enabledText(settings.domainGroupEnabled)
                 + "\n导出目录: Download/ViaTabsAgent";
@@ -1178,7 +1393,7 @@ public class Hook implements IXposedHookLoadPackage {
         handler.post(new Runnable() {
             @Override
             public void run() {
-                button.setText(text);
+                applyPanelButtonStyle(button, panelStateForText(text));
                 button.setEnabled(enabled);
             }
         });
@@ -1192,10 +1407,29 @@ public class Hook implements IXposedHookLoadPackage {
         handler.postDelayed(new Runnable() {
             @Override
             public void run() {
-                button.setText("\u4e66\u7b7e");
+                applyPanelButtonStyle(button, PANEL_STATE_DEFAULT);
                 button.setEnabled(true);
             }
         }, delayMs);
+    }
+
+    private static int panelStateForText(String text) {
+        if ("读取中".equals(text)) {
+            return PANEL_STATE_READING;
+        }
+        if ("确认".equals(text)) {
+            return PANEL_STATE_CONFIRM;
+        }
+        if ("保存中".equals(text)) {
+            return PANEL_STATE_SAVING;
+        }
+        if ("完成".equals(text)) {
+            return PANEL_STATE_DONE;
+        }
+        if ("失败".equals(text)) {
+            return PANEL_STATE_FAILED;
+        }
+        return PANEL_STATE_DEFAULT;
     }
 
     private static void saveCurrentTabsToBookmarks(final String folderName, final Context uiContext) {
@@ -1267,6 +1501,198 @@ public class Hook implements IXposedHookLoadPackage {
                 saveAndExportTabsNow(folderName, tabs, uiContext, source);
             }
         });
+    }
+
+    private static void importExportGroups(final Intent intent) {
+        if (intent == null) {
+            return;
+        }
+        final ArrayList<String> jsonNames = intent.getStringArrayListExtra(EXTRA_JSON_NAMES);
+        final ArrayList<String> htmlNames = intent.getStringArrayListExtra(EXTRA_HTML_NAMES);
+        WRITER.execute(new Runnable() {
+            @Override
+            public void run() {
+                int inserted = 0;
+                int skipped = 0;
+                int groups = 0;
+                String error = null;
+                try {
+                    int max = Math.max(jsonNames == null ? 0 : jsonNames.size(),
+                            htmlNames == null ? 0 : htmlNames.size());
+                    for (int i = 0; i < max; i++) {
+                        String jsonName = jsonNames != null && i < jsonNames.size() ? jsonNames.get(i) : null;
+                        String htmlName = htmlNames != null && i < htmlNames.size() ? htmlNames.get(i) : null;
+                        List<TabRecord> tabs = readExportedTabs(jsonName, htmlName);
+                        if (tabs.isEmpty()) {
+                            log("import export group skipped: json=" + jsonName + " html=" + htmlName);
+                            continue;
+                        }
+                        BookmarkBatch batch = createImportBatch(jsonName, htmlName, tabs);
+                        BookmarkSaveResult result = saveTabsToViaBookmarks(batch, tabs);
+                        inserted += result.inserted;
+                        skipped += result.skipped;
+                        groups++;
+                        log("imported export group: folder=" + batch.folderName
+                                + " tabs=" + tabs.size() + " inserted=" + result.inserted
+                                + " skipped=" + result.skipped);
+                    }
+                } catch (Throwable t) {
+                    error = shortError(t);
+                    log("import export groups failed: " + t);
+                }
+                recordImportResult(groups, inserted, skipped, error);
+                toast(appContext, error == null
+                        ? "已导入 " + inserted + " 个书签到 " + (appContext == null ? "Via" : appContext.getPackageName())
+                        : "导入失败：" + error);
+            }
+        });
+    }
+
+    private static List<TabRecord> readExportedTabs(String jsonName, String htmlName) {
+        List<TabRecord> tabs = readExportedJsonTabs(jsonName);
+        if (!tabs.isEmpty()) {
+            return tabs;
+        }
+        return readExportedHtmlTabs(htmlName);
+    }
+
+    private static List<TabRecord> readExportedJsonTabs(String fileName) {
+        ArrayList<TabRecord> tabs = new ArrayList<TabRecord>();
+        if (fileName == null || fileName.length() == 0) {
+            return tabs;
+        }
+        try {
+            String payload = readExportFileFromModule(fileName);
+            if (payload == null || payload.trim().length() == 0) {
+                return tabs;
+            }
+            JSONArray array = new JSONObject(payload).optJSONArray("tabs");
+            if (array == null) {
+                return tabs;
+            }
+            LinkedHashSet<String> seen = new LinkedHashSet<String>();
+            for (int i = 0; i < array.length(); i++) {
+                JSONObject item = array.optJSONObject(i);
+                if (item == null) {
+                    continue;
+                }
+                String url = item.optString("url", "").trim();
+                if (!isBookmarkableUrl(url) || !seen.add(url)) {
+                    continue;
+                }
+                String title = item.optString("title", "").trim();
+                tabs.add(new TabRecord(tabs.size(), title, url));
+            }
+        } catch (Throwable t) {
+            log("read exported json tabs failed: " + fileName + " " + t);
+        }
+        return tabs;
+    }
+
+    private static List<TabRecord> readExportedHtmlTabs(String fileName) {
+        ArrayList<TabRecord> tabs = new ArrayList<TabRecord>();
+        if (fileName == null || fileName.length() == 0) {
+            return tabs;
+        }
+        try {
+            String html = readExportFileFromModule(fileName);
+            if (html == null || html.length() == 0) {
+                return tabs;
+            }
+            LinkedHashSet<String> seen = new LinkedHashSet<String>();
+            int offset = 0;
+            while (offset >= 0 && offset < html.length()) {
+                int hrefAt = html.indexOf("HREF=\"", offset);
+                if (hrefAt < 0) {
+                    hrefAt = html.indexOf("href=\"", offset);
+                }
+                if (hrefAt < 0) {
+                    break;
+                }
+                int urlStart = hrefAt + 6;
+                int urlEnd = html.indexOf('"', urlStart);
+                int titleStart = html.indexOf('>', urlEnd);
+                int titleEnd = html.indexOf("</A>", titleStart);
+                if (titleEnd < 0) {
+                    titleEnd = html.indexOf("</a>", titleStart);
+                }
+                offset = urlEnd > 0 ? urlEnd + 1 : hrefAt + 1;
+                if (urlEnd <= urlStart || titleStart < 0 || titleEnd < 0) {
+                    continue;
+                }
+                String url = unescapeBookmarkHtml(html.substring(urlStart, urlEnd)).trim();
+                if (!isBookmarkableUrl(url) || !seen.add(url)) {
+                    continue;
+                }
+                String title = unescapeBookmarkHtml(html.substring(titleStart + 1, titleEnd)).trim();
+                tabs.add(new TabRecord(tabs.size(), title, url));
+            }
+        } catch (Throwable t) {
+            log("read exported html tabs failed: " + fileName + " " + t);
+        }
+        return tabs;
+    }
+
+    private static String readExportFileFromModule(String fileName) {
+        if (appContext == null || fileName == null || fileName.length() == 0) {
+            return "";
+        }
+        try {
+            Bundle extras = new Bundle();
+            extras.putString(ExportProvider.EXTRA_FILE_NAME, fileName);
+            Bundle result = appContext.getContentResolver().call(
+                    AgentStore.EXPORT_URI,
+                    ExportProvider.METHOD_READ_EXPORT_FILE,
+                    null,
+                    extras);
+            return result == null ? "" : result.getString(ExportProvider.EXTRA_PAYLOAD, "");
+        } catch (Throwable t) {
+            log("read export file from module failed: " + fileName + " " + t);
+            return "";
+        }
+    }
+
+    private static BookmarkBatch createImportBatch(String jsonName, String htmlName, List<TabRecord> tabs) {
+        long now = System.currentTimeMillis();
+        String baseName = jsonName != null && jsonName.endsWith(".json")
+                ? jsonName.substring(0, jsonName.length() - 5)
+                : htmlName != null && htmlName.endsWith(".html")
+                ? htmlName.substring(0, htmlName.length() - 5)
+                : "via-import-" + now;
+        String folderName = "导入-" + baseName;
+        int bookmarkCount = countBookmarkableTabs(tabs);
+        ExportSettings settings = readExportSettings();
+        return new BookmarkBatch(folderName, baseName, now / 1000L, bookmarkCount,
+                settings.domainGroupEnabled, groupTabsByDomain(tabs));
+    }
+
+    private static void recordImportResult(int groups, int inserted, int skipped, String error) {
+        if (appContext == null) {
+            return;
+        }
+        try {
+            JSONObject root = new JSONObject();
+            root.put("time", new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date()));
+            root.put("timestamp", System.currentTimeMillis());
+            root.put("source", "localExport.import");
+            root.put("targetPackage", appContext.getPackageName());
+            root.put("folder", "本地导出数据导入");
+            root.put("captured", groups);
+            root.put("bookmarkable", inserted + skipped);
+            root.put("inserted", inserted);
+            root.put("skipped", skipped);
+            root.put("domainGroup", readExportSettings().domainGroupEnabled);
+            root.put("error", error == null ? JSONObject.NULL : error);
+            Bundle extras = new Bundle();
+            extras.putString(ExportProvider.EXTRA_RESULT, root.toString());
+            appContext.getContentResolver().call(
+                    AgentStore.EXPORT_URI,
+                    ExportProvider.METHOD_SET_LAST_RESULT,
+                    null,
+                    extras);
+        } catch (Throwable t) {
+            log("record import result failed: " + t);
+        }
     }
 
     private static void saveAndExportTabs(final BookmarkBatch batch, final List<TabRecord> tabs,
@@ -2123,6 +2549,16 @@ public class Hook implements IXposedHookLoadPackage {
             }
         }
         return out.toString();
+    }
+
+    private static String unescapeBookmarkHtml(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.replace("&quot;", "\"")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&amp;", "&");
     }
 
     private static JSONObject baseSnapshot(String source) throws Exception {

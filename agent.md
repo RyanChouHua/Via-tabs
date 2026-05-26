@@ -444,6 +444,7 @@ ViaTabsAgent/app/src/main/java/com/viatabs/agent/Hook.java
 6. 启动 Via 后可恢复 agent 保存过但 Via 原生未恢复的标签页。
 7. 一键保存当前已打开标签页到 Via 原生书签文件夹。
 8. 保存标签页分组快照，并可同步创建同名 Via 书签文件夹。
+9. 支持参考 OneTab/Chrome/Edge 后的移动端分组管理：稳定 `groupId`、组名、颜色、归档状态、删除和整组恢复。
 
 调试广播：
 
@@ -458,7 +459,11 @@ $serial='emulator-5556'
 & $adb -s $serial shell am broadcast -a com.viatabs.agent.CLOSE_VIA
 & $adb -s $serial shell am broadcast -a com.viatabs.agent.RESTORE_AGENT_SESSION
 & $adb -s $serial shell am broadcast -a com.viatabs.agent.SAVE_TABS_TO_BOOKMARKS --es folder ViaTabsAgent
-& $adb -s $serial shell am broadcast -a com.viatabs.agent.GROUP_TABS --es group SessionGroup --ez bookmarks true
+& $adb -s $serial shell am broadcast -a com.viatabs.agent.GROUP_TABS --es group SessionGroup --es color green --ez bookmarks true
+& $adb -s $serial shell am broadcast -a com.viatabs.agent.RESTORE_TAB_GROUP --es group SessionGroup --ez dedupe true
+& $adb -s $serial shell am broadcast -a com.viatabs.agent.RESTORE_TAB_GROUP --es group SessionGroup --ei index 2 --ez dedupe true
+& $adb -s $serial shell am broadcast -a com.viatabs.agent.ARCHIVE_TAB_GROUP --es group SessionGroup --ez archived true
+& $adb -s $serial shell am broadcast -a com.viatabs.agent.DELETE_TAB_GROUP --es group SessionGroup
 ```
 
 写出文件：
@@ -485,3 +490,35 @@ $serial='emulator-5556'
 - Via 启动时恢复未关闭标签后，打开 10 个测试标签，再退出并重启，agent 可读取已打开标签页。
 - 执行 `SAVE_TABS_TO_BOOKMARKS` 后，12 个当前标签中 11 个 HTTP/HTTPS 标签写入 Via 原生书签，1 个 Via 内部 `file://` 首页被正确跳过。
 - 执行 `GROUP_TABS` 后，分组快照写入 `tab-groups.json`，并创建同名书签文件夹。
+
+## 分组功能设计参考
+
+参考 OneTab、Chrome Android 标签分组和 Edge Collections 后，ViaTabsAgent 采用更适合 Via 移动端的轻量方案：
+
+- OneTab 的核心优点是把当前标签转换成本地列表，并支持单个或全部恢复；ViaTabsAgent 当前落地为 `GROUP_TABS` 保存分组、`RESTORE_TAB_GROUP` 整组恢复或按 `index`/`url` 恢复单个标签。
+- Chrome Android 标签分组强调组名、颜色、恢复、删除和非活跃分组；ViaTabsAgent 当前落地为 `groupId`、`group`、`color`、`archived`、`DELETE_TAB_GROUP`。
+- Edge Collections 更像长期资料集合，支持以后逐个或全部打开；ViaTabsAgent 当前通过 `tab-groups.json` 保存长期集合，并可同步写入 Via 原生书签文件夹。
+- Via 移动端没有桌面扩展 API，也没有稳定公开的 tab group UI；因此先把分组做成进程内 agent 能力和 JSON 数据模型，后续可以在单独 UI 或脚本层调用。
+- `close=true` 目前只记录 `closeRequested`，暂不自动关闭当前标签，避免在关闭方法未完全适配前误删用户现场。
+
+分组 JSON 字段：
+
+```json
+{
+  "groupId": "stable-id",
+  "group": "SessionGroup",
+  "color": "green",
+  "archived": false,
+  "closeRequested": false,
+  "folderId": "via-bookmark-folder-id",
+  "tabCount": 4,
+  "bookmarkableCount": 3,
+  "tabs": []
+}
+```
+
+参考资料：
+
+- OneTab Chrome Web Store: https://chromewebstore.google.com/detail/onetab/chphlpgkkbolifaimnlloiipkdnihall
+- Chrome Android tabs and tab groups: https://support.google.com/chrome/answer/2391819
+- Edge Collections: https://support.microsoft.com/en-us/microsoft-edge/organize-your-ideas-with-collections-in-microsoft-edge-60fd7bba-6cfd-00b9-3787-b197231b507e

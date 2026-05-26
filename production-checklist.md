@@ -172,7 +172,13 @@ $serial='emulator-5556'
 Start-Sleep -Seconds 10
 & $adb -s $serial shell am broadcast -a com.viatabs.agent.SAVE_TABS_TO_BOOKMARKS --es folder ViaTabsAgent
 Start-Sleep -Seconds 3
-& $adb -s $serial shell am broadcast -a com.viatabs.agent.GROUP_TABS --es group SessionGroup --ez bookmarks true
+& $adb -s $serial shell am broadcast -a com.viatabs.agent.GROUP_TABS --es group SessionGroup --es color green --ez bookmarks true
+Start-Sleep -Seconds 3
+& $adb -s $serial shell am broadcast -a com.viatabs.agent.RESTORE_TAB_GROUP --es group SessionGroup --ez dedupe true
+Start-Sleep -Seconds 3
+& $adb -s $serial shell am broadcast -a com.viatabs.agent.RESTORE_TAB_GROUP --es group SessionGroup --ei index 1 --ez dedupe true
+Start-Sleep -Seconds 3
+& $adb -s $serial shell am broadcast -a com.viatabs.agent.ARCHIVE_TAB_GROUP --es group SessionGroup --ez archived true
 Start-Sleep -Seconds 3
 & $adb -s $serial shell logcat -d -s ViaTabsAgent LSPosed-Bridge
 & $adb -s $serial shell cat /sdcard/Android/data/mark.via.gp/files/ViaTabsAgent/saved-bookmarks.json
@@ -183,8 +189,10 @@ Start-Sleep -Seconds 3
 
 - logcat 出现 `saved tabs to bookmarks`。
 - logcat 出现 `grouped tabs`。
+- logcat 出现 `restored tab group`。
+- logcat 出现 `archive tab group`。
 - `saved-bookmarks.json` 包含当前标签页快照、目标书签文件夹、`inserted` 和 `skipped` 统计。
-- `tab-groups.json` 追加当前分组快照。
+- `tab-groups.json` 追加当前分组快照，并包含 `groupId`、`group`、`color`、`archived`、`tabCount`。
 - `file://` 等 Via 内部页面不写入原生书签，但仍保留在分组 JSON 中。
 
 注意事项：

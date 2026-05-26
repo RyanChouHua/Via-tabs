@@ -62,6 +62,9 @@ public class Hook implements IXposedHookLoadPackage {
     private static final String ACTION_RESTORE_AGENT_SESSION = "com.viatabs.agent.RESTORE_AGENT_SESSION";
     private static final String ACTION_SAVE_TABS_TO_BOOKMARKS = "com.viatabs.agent.SAVE_TABS_TO_BOOKMARKS";
     private static final String ACTION_GROUP_TABS = "com.viatabs.agent.GROUP_TABS";
+    private static final String ACTION_RESTORE_TAB_GROUP = "com.viatabs.agent.RESTORE_TAB_GROUP";
+    private static final String ACTION_ARCHIVE_TAB_GROUP = "com.viatabs.agent.ARCHIVE_TAB_GROUP";
+    private static final String ACTION_DELETE_TAB_GROUP = "com.viatabs.agent.DELETE_TAB_GROUP";
 
     @Override
     public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lpparam) {
@@ -119,6 +122,9 @@ public class Hook implements IXposedHookLoadPackage {
         filter.addAction(ACTION_RESTORE_AGENT_SESSION);
         filter.addAction(ACTION_SAVE_TABS_TO_BOOKMARKS);
         filter.addAction(ACTION_GROUP_TABS);
+        filter.addAction(ACTION_RESTORE_TAB_GROUP);
+        filter.addAction(ACTION_ARCHIVE_TAB_GROUP);
+        filter.addAction(ACTION_DELETE_TAB_GROUP);
 
         BroadcastReceiver receiver = new BroadcastReceiver() {
             @Override
@@ -145,9 +151,23 @@ public class Hook implements IXposedHookLoadPackage {
                     String folder = intent.getStringExtra("folder");
                     saveCurrentTabsToBookmarks(folder == null ? "ViaTabsAgent" : folder);
                 } else if (ACTION_GROUP_TABS.equals(action)) {
+                    String groupId = intent.getStringExtra("groupId");
                     String group = intent.getStringExtra("group");
                     boolean saveBookmarks = intent.getBooleanExtra("bookmarks", true);
-                    groupCurrentTabs(group, saveBookmarks);
+                    String color = intent.getStringExtra("color");
+                    boolean archived = intent.getBooleanExtra("archived", false);
+                    boolean closeTabs = intent.getBooleanExtra("close", false);
+                    groupCurrentTabs(groupId, group, color, saveBookmarks, archived, closeTabs);
+                } else if (ACTION_RESTORE_TAB_GROUP.equals(action)) {
+                    restoreTabGroup(intent.getStringExtra("groupId"), intent.getStringExtra("group"),
+                            intent.getBooleanExtra("dedupe", true),
+                            intent.getIntExtra("index", -1),
+                            intent.getStringExtra("url"));
+                } else if (ACTION_ARCHIVE_TAB_GROUP.equals(action)) {
+                    updateTabGroupArchive(intent.getStringExtra("groupId"), intent.getStringExtra("group"),
+                            intent.getBooleanExtra("archived", true));
+                } else if (ACTION_DELETE_TAB_GROUP.equals(action)) {
+                    deleteTabGroup(intent.getStringExtra("groupId"), intent.getStringExtra("group"));
                 }
             }
         };
@@ -411,7 +431,9 @@ public class Hook implements IXposedHookLoadPackage {
         });
     }
 
-    private static void groupCurrentTabs(final String groupName, final boolean saveBookmarks) {
+    private static void groupCurrentTabs(final String groupId, final String groupName, final String color,
+                                         final boolean saveBookmarks, final boolean archived,
+                                         final boolean closeTabs) {
         final Object manager = lastTabManager;
         if (manager == null || mainHandler == null) {
             log("groupCurrentTabs skipped: tab manager not ready");
@@ -430,9 +452,10 @@ public class Hook implements IXposedHookLoadPackage {
                         public void run() {
                             try {
                                 BookmarkSaveResult result = saveBookmarks ? saveTabsToViaBookmarks(safeGroup, tabs) : new BookmarkSaveResult();
-                                writeTabGroupSnapshot(safeGroup, tabs, result);
+                                writeTabGroupSnapshot(groupId, safeGroup, color, archived, closeTabs, tabs, result);
                                 log("grouped tabs: group=" + safeGroup + " tabs=" + tabs.size()
-                                        + " bookmarks=" + saveBookmarks + " inserted=" + result.inserted);
+                                        + " bookmarks=" + saveBookmarks + " inserted=" + result.inserted
+                                        + " archived=" + archived + " closeRequested=" + closeTabs);
                             } catch (Throwable t) {
                                 log("groupCurrentTabs background failed: " + t);
                             }
@@ -651,26 +674,28 @@ public class Hook implements IXposedHookLoadPackage {
         }
     }
 
-    private static void writeTabGroupSnapshot(String groupName, List<TabRecord> tabs, BookmarkSaveResult result) {
+    private static void writeTabGroupSnapshot(String requestedGroupId, String groupName, String color,
+                                              boolean archived, boolean closeTabs,
+                                              List<TabRecord> tabs, BookmarkSaveResult result) {
         try {
+            String groupId = requestedGroupId == null || requestedGroupId.trim().length() == 0
+                    ? UUID.randomUUID().toString()
+                    : requestedGroupId.trim();
             JSONObject group = baseSnapshot("tabs.group");
+            group.put("groupId", groupId);
             group.put("group", groupName);
+            group.put("color", normalizeGroupColor(color));
+            group.put("archived", archived);
+            group.put("closeRequested", closeTabs);
             group.put("folderId", result.folderId == null ? JSONObject.NULL : result.folderId);
             group.put("inserted", result.inserted);
             group.put("skipped", result.skipped);
+            group.put("tabCount", tabs.size());
+            group.put("bookmarkableCount", countBookmarkableTabs(tabs));
             group.put("tabs", toTabRecordArray(tabs));
 
             File file = new File(agentDir(), "tab-groups.json");
-            JSONArray groups = new JSONArray();
-            if (file.exists() && file.length() > 0 && file.length() <= 1024 * 1024) {
-                JSONObject existing = readJsonFile(file);
-                JSONArray oldGroups = existing.optJSONArray("groups");
-                if (oldGroups != null) {
-                    for (int i = 0; i < oldGroups.length(); i++) {
-                        groups.put(oldGroups.get(i));
-                    }
-                }
-            }
+            JSONArray groups = readTabGroups(file);
             groups.put(group);
             JSONObject root = baseSnapshot("tabs.groups");
             root.put("groups", groups);
@@ -678,6 +703,186 @@ public class Hook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             log("write tab group snapshot failed: " + t);
         }
+    }
+
+    private static void restoreTabGroup(final String groupId, final String groupName, final boolean dedupe,
+                                        final int targetIndex, final String targetUrl) {
+        final Object manager = lastTabManager;
+        if (manager == null || mainHandler == null) {
+            log("restoreTabGroup skipped: tab manager not ready");
+            return;
+        }
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    JSONObject group = findTabGroup(groupId, groupName);
+                    if (group == null) {
+                        log("restoreTabGroup skipped: group not found");
+                        return;
+                    }
+                    JSONArray tabs = group.optJSONArray("tabs");
+                    if (tabs == null || tabs.length() == 0) {
+                        log("restoreTabGroup skipped: group has no tabs");
+                        return;
+                    }
+                    Object rawCurrent = XposedHelpers.callMethod(manager, "C");
+                    Set<String> current = new LinkedHashSet<String>(rawCurrent instanceof List
+                            ? normalizeUrls((List<?>) rawCurrent)
+                            : new ArrayList<String>());
+                    int opened = 0;
+                    for (int i = 0; i < tabs.length(); i++) {
+                        JSONObject tab = tabs.optJSONObject(i);
+                        if (tab == null) {
+                            continue;
+                        }
+                        String url = tab.optString("url", "").trim();
+                        if (!matchesRestoreTarget(tab, url, targetIndex, targetUrl)) {
+                            continue;
+                        }
+                        if (!isBookmarkableUrl(url)) {
+                            continue;
+                        }
+                        if (dedupe && current.contains(url)) {
+                            continue;
+                        }
+                        XposedHelpers.callMethod(manager, "K", url, 0);
+                        current.add(url);
+                        opened++;
+                    }
+                    snapshotFromLastTabManager("tabGroup.restore");
+                    log("restored tab group: groupId=" + group.optString("groupId") + " group="
+                            + group.optString("group") + " opened=" + opened + " dedupe=" + dedupe
+                            + " index=" + targetIndex);
+                } catch (Throwable t) {
+                    log("restoreTabGroup failed: " + t);
+                }
+            }
+        });
+    }
+
+    private static void updateTabGroupArchive(final String groupId, final String groupName, final boolean archived) {
+        WRITER.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    File file = new File(agentDir(), "tab-groups.json");
+                    JSONArray groups = readTabGroups(file);
+                    boolean changed = false;
+                    for (int i = 0; i < groups.length(); i++) {
+                        JSONObject group = groups.optJSONObject(i);
+                        if (matchesGroup(group, groupId, groupName)) {
+                            group.put("archived", archived);
+                            group.put("updatedAt", System.currentTimeMillis());
+                            changed = true;
+                        }
+                    }
+                    if (changed) {
+                        writeTabGroups(file, groups);
+                    }
+                    log("archive tab group: changed=" + changed + " archived=" + archived);
+                } catch (Throwable t) {
+                    log("archive tab group failed: " + t);
+                }
+            }
+        });
+    }
+
+    private static void deleteTabGroup(final String groupId, final String groupName) {
+        WRITER.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    File file = new File(agentDir(), "tab-groups.json");
+                    JSONArray groups = readTabGroups(file);
+                    JSONArray kept = new JSONArray();
+                    boolean deleted = false;
+                    for (int i = 0; i < groups.length(); i++) {
+                        JSONObject group = groups.optJSONObject(i);
+                        if (matchesGroup(group, groupId, groupName)) {
+                            deleted = true;
+                            continue;
+                        }
+                        kept.put(groups.get(i));
+                    }
+                    if (deleted) {
+                        writeTabGroups(file, kept);
+                    }
+                    log("delete tab group: deleted=" + deleted);
+                } catch (Throwable t) {
+                    log("delete tab group failed: " + t);
+                }
+            }
+        });
+    }
+
+    private static JSONObject findTabGroup(String groupId, String groupName) throws Exception {
+        JSONArray groups = readTabGroups(new File(agentDir(), "tab-groups.json"));
+        for (int i = groups.length() - 1; i >= 0; i--) {
+            JSONObject group = groups.optJSONObject(i);
+            if (matchesGroup(group, groupId, groupName)) {
+                return group;
+            }
+        }
+        return null;
+    }
+
+    private static boolean matchesGroup(JSONObject group, String groupId, String groupName) {
+        if (group == null) {
+            return false;
+        }
+        String safeId = groupId == null ? "" : groupId.trim();
+        if (safeId.length() > 0 && safeId.equals(group.optString("groupId", ""))) {
+            return true;
+        }
+        String safeName = groupName == null ? "" : groupName.trim();
+        return safeName.length() > 0 && safeName.equals(group.optString("group", ""));
+    }
+
+    private static boolean matchesRestoreTarget(JSONObject tab, String url, int targetIndex, String targetUrl) {
+        String safeUrl = targetUrl == null ? "" : targetUrl.trim();
+        if (safeUrl.length() > 0) {
+            return safeUrl.equals(url);
+        }
+        return targetIndex < 0 || tab.optInt("index", -1) == targetIndex;
+    }
+
+    private static JSONArray readTabGroups(File file) throws Exception {
+        if (!file.exists() || file.length() <= 0 || file.length() > 1024 * 1024) {
+            return new JSONArray();
+        }
+        JSONObject existing = readJsonFile(file);
+        JSONArray oldGroups = existing.optJSONArray("groups");
+        return oldGroups == null ? new JSONArray() : oldGroups;
+    }
+
+    private static void writeTabGroups(File file, JSONArray groups) throws Exception {
+        JSONObject root = baseSnapshot("tabs.groups");
+        root.put("groups", groups);
+        writeJsonToFileNow(file, root.toString(2));
+    }
+
+    private static int countBookmarkableTabs(List<TabRecord> tabs) {
+        int count = 0;
+        for (TabRecord tab : tabs) {
+            if (isBookmarkableUrl(tab.url)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static String normalizeGroupColor(String color) {
+        if (color == null || color.trim().length() == 0) {
+            return "blue";
+        }
+        String safe = color.trim().toLowerCase();
+        if ("red".equals(safe) || "orange".equals(safe) || "yellow".equals(safe)
+                || "green".equals(safe) || "blue".equals(safe) || "purple".equals(safe)
+                || "pink".equals(safe) || "gray".equals(safe)) {
+            return safe;
+        }
+        return "blue";
     }
 
     private static JSONObject readJsonFile(File file) throws Exception {

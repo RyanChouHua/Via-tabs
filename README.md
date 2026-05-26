@@ -38,18 +38,10 @@ ViaTabsAgent 是一个面向 Via 浏览器的 LSPosed/Xposed 模块，用于在 
 │   │   ├── ExportProvider.java   # 模块与 Via 进程之间的 ContentProvider 通道
 │   │   └── ExportReceiver.java
 │   └── app/src/main/assets/xposed_init
-├── docs/
-│   ├── maintenance.md            # 后续维护与迭代计划
-│   ├── cleanup.md                # 本地重型资源清理说明
-│   ├── agent-plan.md             # 早期 agent 方案和调研记录
-│   ├── research-summary.md       # 网络与类似项目调研总结
-│   ├── apk-analysis.md           # Via APK 分析记录
-│   └── production-checklist.md   # 构建与验证清单
-├── AGENTS.md                     # Codex/agent 后续维护约定
 └── README.md
 ```
 
-`research/`、`tools/`、`out/` 为本地研究、工具和构建产物目录，默认不上传 GitHub。
+`docs/`、`AGENTS.md`、`research/`、`tools/`、`out/` 为本地维护、研究、工具和构建产物目录，默认不上传 GitHub。
 
 ## 构建
 

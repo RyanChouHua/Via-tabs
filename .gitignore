@@ -13,6 +13,8 @@ local.properties
 
 # Reverse-engineering outputs and third-party clones
 research/
+docs/
+AGENTS.md
 
 # Tool binaries kept locally
 tools/adb/

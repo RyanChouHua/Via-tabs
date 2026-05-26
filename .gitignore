@@ -11,6 +11,10 @@ out/
 *.class
 local.properties
 
+# Published APK artifacts
+!release/
+!release/*.apk
+
 # Reverse-engineering outputs and third-party clones
 research/
 docs/

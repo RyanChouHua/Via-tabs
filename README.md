@@ -64,6 +64,14 @@ gradle assembleDebug
 ViaTabsAgent/app/build/outputs/apk/debug/app-debug.apk
 ```
 
+## 下载
+
+仓库内保留当前调试构建产物：
+
+```text
+release/ViaTabsAgent-LSPosed-0.4.5-lsposed-ui-debug.apk
+```
+
 ## 使用
 
 1. 安装构建出的 APK。

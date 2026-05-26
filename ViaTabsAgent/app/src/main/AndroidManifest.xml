@@ -27,6 +27,15 @@
             android:authorities="com.viatabs.agent.export"
             android:exported="true" />
 
+        <receiver
+            android:name=".ExportReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.viatabs.agent.WRITE_FILE" />
+                <action android:name="com.viatabs.agent.APPEND_LOG" />
+            </intent-filter>
+        </receiver>
+
         <meta-data
             android:name="xposedmodule"
             android:value="true" />

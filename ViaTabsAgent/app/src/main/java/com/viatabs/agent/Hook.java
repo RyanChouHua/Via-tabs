@@ -3,7 +3,7 @@ package com.viatabs.agent;
 import android.app.Application;
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.content.ContentResolver;
+import android.content.ComponentName;
 import android.content.ContentValues;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -15,11 +15,9 @@ import android.database.sqlite.SQLiteDatabase;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Parcelable;
-import android.provider.MediaStore;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
@@ -37,7 +35,6 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -60,6 +57,7 @@ public class Hook implements IXposedHookLoadPackage {
     private static final String TAG = "ViaTabsAgent";
     private static final String VIA_CN = "mark.via";
     private static final String VIA_GP = "mark.via.gp";
+    private static final String MODULE_PACKAGE = "com.viatabs.agent";
     private static volatile boolean installed;
     private static volatile boolean receiverRegistered;
     private static volatile Context appContext;
@@ -106,6 +104,7 @@ public class Hook implements IXposedHookLoadPackage {
                 installWebViewFallback(classLoader);
                 installViaPanelHook();
                 registerDebugReceiver();
+                log("module attached in " + appContext.getPackageName());
             }
         });
     }
@@ -362,6 +361,7 @@ public class Hook implements IXposedHookLoadPackage {
                 .setPositiveButton("保存", new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
+                        log("panel save clicked");
                         saveCurrentTabsToBookmarks(textOrDefault(input, "ViaTabsAgent"), activity);
                         toast(activity, "正在保存到书签");
                     }
@@ -672,6 +672,7 @@ public class Hook implements IXposedHookLoadPackage {
     }
 
     private static void saveCurrentTabsToBookmarks(final String folderName, final Context uiContext) {
+        log("saveCurrentTabsToBookmarks requested: folder=" + folderName);
         final Object manager = lastTabManager;
         if (manager == null || mainHandler == null) {
             log("saveCurrentTabsToBookmarks skipped: tab manager not ready");
@@ -684,9 +685,11 @@ public class Hook implements IXposedHookLoadPackage {
                 try {
                     final List<TabRecord> tabs = snapshotTabRecords(manager);
                     if (tabs.size() == 0) {
+                        log("saveCurrentTabsToBookmarks skipped: empty tab list");
                         toast(uiContext, "没有读取到可保存的标签");
                         return;
                     }
+                    log("saveCurrentTabsToBookmarks snapshot: tabs=" + tabs.size());
                     WRITER.execute(new Runnable() {
                         @Override
                         public void run() {
@@ -1543,6 +1546,10 @@ public class Hook implements IXposedHookLoadPackage {
         if (path != null) {
             return path;
         }
+        path = writeJsonToDownloadsViaBroadcast(fileName, payload);
+        if (path != null) {
+            return path;
+        }
         try {
             return AgentStore.writeDownloadFile(appContext, fileName, payload);
         } catch (Throwable t) {
@@ -1579,64 +1586,22 @@ public class Hook implements IXposedHookLoadPackage {
         return null;
     }
 
-    private static String writeJsonToDownloadsWithMediaStore(String fileName, String payload) {
-        String relativePath = Environment.DIRECTORY_DOWNLOADS + "/ViaTabsAgent/";
-        Uri uri = null;
-        ContentResolver resolver = appContext.getContentResolver();
-        Cursor cursor = null;
+    private static String writeJsonToDownloadsViaBroadcast(String fileName, String payload) {
         try {
-            Uri collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
-            cursor = resolver.query(collection, new String[]{MediaStore.Downloads._ID},
-                    MediaStore.Downloads.DISPLAY_NAME + "=? AND " + MediaStore.Downloads.RELATIVE_PATH + "=?",
-                    new String[]{fileName, relativePath}, null);
-            if (cursor != null && cursor.moveToFirst()) {
-                long id = cursor.getLong(0);
-                uri = Uri.withAppendedPath(collection, String.valueOf(id));
-            }
-            if (uri == null) {
-                ContentValues values = new ContentValues();
-                values.put(MediaStore.Downloads.DISPLAY_NAME, fileName);
-                values.put(MediaStore.Downloads.MIME_TYPE, "application/json");
-                values.put(MediaStore.Downloads.RELATIVE_PATH, relativePath);
-                values.put(MediaStore.Downloads.IS_PENDING, 1);
-                uri = resolver.insert(collection, values);
-            }
-            if (uri == null) {
-                throw new IllegalStateException("cannot create Download export");
-            }
-            OutputStream stream = resolver.openOutputStream(uri, "wt");
-            if (stream == null) {
-                throw new IllegalStateException("cannot open Download export");
-            }
-            try {
-                stream.write(payload.getBytes(StandardCharsets.UTF_8));
-            } finally {
-                stream.close();
-            }
-            ContentValues done = new ContentValues();
-            done.put(MediaStore.Downloads.IS_PENDING, 0);
-            resolver.update(uri, done, null, null);
-            String path = "Download/ViaTabsAgent/" + fileName;
-            log("wrote " + path);
+            Intent intent = new Intent(ExportReceiver.ACTION_WRITE_FILE);
+            intent.setComponent(new ComponentName(MODULE_PACKAGE, "com.viatabs.agent.ExportReceiver"));
+            intent.putExtra(ExportProvider.EXTRA_FILE_NAME, fileName);
+            intent.putExtra(ExportProvider.EXTRA_PAYLOAD, payload);
+            appContext.sendBroadcast(intent);
+            String path = "/storage/emulated/0/Download/ViaTabsAgent/" + fileName;
+            Log.i(TAG, "sent export broadcast: " + path);
+            XposedBridge.log(TAG + ": sent export broadcast: " + path);
             return path;
         } catch (Throwable t) {
-            log("write Download via MediaStore failed: " + t);
-            return writeJsonToLegacyDownloads(fileName, payload);
-        } finally {
-            if (cursor != null) {
-                cursor.close();
-            }
+            Log.i(TAG, "module export broadcast unavailable: " + t);
+            XposedBridge.log(TAG + ": module export broadcast unavailable: " + t);
+            return null;
         }
-    }
-
-    private static String writeJsonToLegacyDownloads(String fileName, String payload) {
-        File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "ViaTabsAgent");
-        if (!dir.exists() && !dir.mkdirs()) {
-            throw new IllegalStateException("cannot create " + dir);
-        }
-        File out = new File(dir, fileName);
-        writeJsonToFileNow(out, payload);
-        return out.getAbsolutePath();
     }
 
     private static boolean isTabManagerSource(String source) {
@@ -1658,7 +1623,14 @@ public class Hook implements IXposedHookLoadPackage {
             extras.putString(ExportProvider.EXTRA_MESSAGE, message);
             appContext.getContentResolver().call(AgentStore.LOG_URI,
                     ExportProvider.METHOD_APPEND_LOG, null, extras);
-        } catch (Throwable ignored) {
+        } catch (Throwable providerError) {
+            try {
+                Intent intent = new Intent(ExportReceiver.ACTION_APPEND_LOG);
+                intent.setComponent(new ComponentName(MODULE_PACKAGE, "com.viatabs.agent.ExportReceiver"));
+                intent.putExtra(ExportProvider.EXTRA_MESSAGE, message);
+                appContext.sendBroadcast(intent);
+            } catch (Throwable ignored) {
+            }
         }
     }
 

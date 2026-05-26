@@ -98,6 +98,13 @@ public class MainActivity extends Activity {
                     + "2. 强制停止 Via 后重新打开。\n"
                     + "3. 在 Via 内点击“标签”按钮保存。\n"
                     + "4. 回到这里点“刷新日志”。";
+        } else if (!log.contains("module attached in")
+                && !log.contains("loaded in mark.via")
+                && !log.contains("loaded in mark.via.gp")) {
+            log = "未检测到 Via 注入日志。\n"
+                    + "如果保存后仍只看到“打开模块界面”，请在 LSPosed 中确认已启用模块、"
+                    + "作用域勾选 mark.via / mark.via.gp，并强制停止 Via 后重新打开。\n\n"
+                    + log;
         }
         logView.setText(log);
     }

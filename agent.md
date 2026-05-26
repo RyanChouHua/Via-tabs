@@ -425,3 +425,63 @@ MVP 验收标准：
 2. 第二阶段借鉴 BetterVia，做 Xposed/LSPatch 注入模块，在 Via 进程内优先采集 `Le/h/a/e/c` 标签管理器状态，再用 `Le/h/a/g/a` 自定义 WebView 兜底，作为生产级稳定方案。
 
 不建议一开始直接读 Via 私有数据。它需要 root，且无法保证当前打开标签一定有稳定持久化结构。相比之下，WebView 进程内读取和 ADB UI 自动化都更符合实际可交付路径。
+
+## 当前 Agent 功能
+
+当前已经进入 Xposed/LSPatch 生产增强路线，核心模块位于：
+
+```text
+ViaTabsAgent/app/src/main/java/com/viatabs/agent/Hook.java
+```
+
+已实现能力：
+
+1. 在 Via 7.0.0 进程内 hook 内部标签管理器 `e.h.a.e.c`。
+2. 通过 `C()` 读取当前所有已打开标签页 URL。
+3. 通过单标签 WebView `getTitle()` 或保存状态 `Bundle` 补充标题。
+4. 扩展 Via 原生会话保存逻辑，避免只保存当前标签附近少量标签的问题。
+5. 将完整会话写出到 `agent-session.json`。
+6. 启动 Via 后可恢复 agent 保存过但 Via 原生未恢复的标签页。
+7. 一键保存当前已打开标签页到 Via 原生书签文件夹。
+8. 保存标签页分组快照，并可同步创建同名 Via 书签文件夹。
+
+调试广播：
+
+```powershell
+$adb='C:\A_Program\Env\android-sdk\platform-tools\adb.exe'
+$serial='emulator-5556'
+
+& $adb -s $serial shell am broadcast -a com.viatabs.agent.DUMP_TABS
+& $adb -s $serial shell am broadcast -a com.viatabs.agent.OPEN_TEST_TABS --ei count 10
+& $adb -s $serial shell am broadcast -a com.viatabs.agent.SWITCH_TAB --ei index 3
+& $adb -s $serial shell am broadcast -a com.viatabs.agent.SET_RESTORE_ALWAYS --ez enabled true
+& $adb -s $serial shell am broadcast -a com.viatabs.agent.CLOSE_VIA
+& $adb -s $serial shell am broadcast -a com.viatabs.agent.RESTORE_AGENT_SESSION
+& $adb -s $serial shell am broadcast -a com.viatabs.agent.SAVE_TABS_TO_BOOKMARKS --es folder ViaTabsAgent
+& $adb -s $serial shell am broadcast -a com.viatabs.agent.GROUP_TABS --es group SessionGroup --ez bookmarks true
+```
+
+写出文件：
+
+```text
+/sdcard/Android/data/mark.via.gp/files/ViaTabsAgent/tabs.json
+/sdcard/Android/data/mark.via.gp/files/ViaTabsAgent/agent-session.json
+/sdcard/Android/data/mark.via.gp/files/ViaTabsAgent/saved-bookmarks.json
+/sdcard/Android/data/mark.via.gp/files/ViaTabsAgent/tab-groups.json
+```
+
+书签保存策略：
+
+- Via 7.0.0 GP 版书签数据库名为 `via`。
+- 文件夹表：`bookmark_folders(_id,title,parent_folder_id,ordering,created_at,last_updated_at)`。
+- 条目表：`bookmark_items(_id,url,title,folder_id,ordering,last_updated_at,created_at)`。
+- Agent 会创建或复用指定名称的顶层书签文件夹。
+- 同一文件夹内相同 URL 会跳过，避免重复插入。
+- 只写入 `http://` 和 `https://` URL；Via 内部首页等 `file://` URL 会记录到 JSON，但不写入原生书签。
+
+已验证结果：
+
+- 在 Android 13 模拟器 `emulator-5556` 上，LSPatch 后的 Via 7.0.0 GP 版可加载 agent。
+- Via 启动时恢复未关闭标签后，打开 10 个测试标签，再退出并重启，agent 可读取已打开标签页。
+- 执行 `SAVE_TABS_TO_BOOKMARKS` 后，12 个当前标签中 11 个 HTTP/HTTPS 标签写入 Via 原生书签，1 个 Via 内部 `file://` 首页被正确跳过。
+- 执行 `GROUP_TABS` 后，分组快照写入 `tab-groups.json`，并创建同名书签文件夹。

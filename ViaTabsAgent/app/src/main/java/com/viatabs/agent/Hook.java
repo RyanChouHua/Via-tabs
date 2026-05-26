@@ -1,10 +1,14 @@
 package com.viatabs.agent;
 
 import android.app.Application;
+import android.content.ContentValues;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.database.Cursor;
+import android.database.sqlite.SQLiteDatabase;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -25,6 +29,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -55,6 +60,8 @@ public class Hook implements IXposedHookLoadPackage {
     private static final String ACTION_SET_RESTORE_ALWAYS = "com.viatabs.agent.SET_RESTORE_ALWAYS";
     private static final String ACTION_CLOSE_VIA = "com.viatabs.agent.CLOSE_VIA";
     private static final String ACTION_RESTORE_AGENT_SESSION = "com.viatabs.agent.RESTORE_AGENT_SESSION";
+    private static final String ACTION_SAVE_TABS_TO_BOOKMARKS = "com.viatabs.agent.SAVE_TABS_TO_BOOKMARKS";
+    private static final String ACTION_GROUP_TABS = "com.viatabs.agent.GROUP_TABS";
 
     @Override
     public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lpparam) {
@@ -110,6 +117,8 @@ public class Hook implements IXposedHookLoadPackage {
         filter.addAction(ACTION_SET_RESTORE_ALWAYS);
         filter.addAction(ACTION_CLOSE_VIA);
         filter.addAction(ACTION_RESTORE_AGENT_SESSION);
+        filter.addAction(ACTION_SAVE_TABS_TO_BOOKMARKS);
+        filter.addAction(ACTION_GROUP_TABS);
 
         BroadcastReceiver receiver = new BroadcastReceiver() {
             @Override
@@ -132,6 +141,13 @@ public class Hook implements IXposedHookLoadPackage {
                     android.os.Process.killProcess(android.os.Process.myPid());
                 } else if (ACTION_RESTORE_AGENT_SESSION.equals(action)) {
                     restoreAgentSession("broadcast.restoreAgentSession");
+                } else if (ACTION_SAVE_TABS_TO_BOOKMARKS.equals(action)) {
+                    String folder = intent.getStringExtra("folder");
+                    saveCurrentTabsToBookmarks(folder == null ? "ViaTabsAgent" : folder);
+                } else if (ACTION_GROUP_TABS.equals(action)) {
+                    String group = intent.getStringExtra("group");
+                    boolean saveBookmarks = intent.getBooleanExtra("bookmarks", true);
+                    groupCurrentTabs(group, saveBookmarks);
                 }
             }
         };
@@ -359,6 +375,302 @@ public class Hook implements IXposedHookLoadPackage {
         } finally {
             IN_MANAGER_SNAPSHOT.remove();
         }
+    }
+
+    private static void saveCurrentTabsToBookmarks(final String folderName) {
+        final Object manager = lastTabManager;
+        if (manager == null || mainHandler == null) {
+            log("saveCurrentTabsToBookmarks skipped: tab manager not ready");
+            return;
+        }
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    List<TabRecord> tabs = snapshotTabRecords(manager);
+                    BookmarkSaveResult result = saveTabsToViaBookmarks(folderName, tabs);
+                    writeBookmarkSaveSnapshot(folderName, tabs, result);
+                    log("saved tabs to bookmarks: folder=" + folderName + " tabs=" + tabs.size()
+                            + " inserted=" + result.inserted + " skipped=" + result.skipped);
+                } catch (Throwable t) {
+                    log("saveCurrentTabsToBookmarks failed: " + t);
+                }
+            }
+        });
+    }
+
+    private static void groupCurrentTabs(String groupName, boolean saveBookmarks) {
+        Object manager = lastTabManager;
+        if (manager == null) {
+            log("groupCurrentTabs skipped: tab manager not ready");
+            return;
+        }
+        String safeGroup = groupName == null || groupName.trim().length() == 0
+                ? "ViaTabs " + System.currentTimeMillis()
+                : groupName.trim();
+        try {
+            List<TabRecord> tabs = snapshotTabRecords(manager);
+            BookmarkSaveResult result = saveBookmarks ? saveTabsToViaBookmarks(safeGroup, tabs) : new BookmarkSaveResult();
+            writeTabGroupSnapshot(safeGroup, tabs, result);
+            log("grouped tabs: group=" + safeGroup + " tabs=" + tabs.size()
+                    + " bookmarks=" + saveBookmarks + " inserted=" + result.inserted);
+        } catch (Throwable t) {
+            log("groupCurrentTabs failed: " + t);
+        }
+    }
+
+    private static List<TabRecord> snapshotTabRecords(Object manager) {
+        ArrayList<TabRecord> records = new ArrayList<TabRecord>();
+        Object urls = XposedHelpers.callMethod(manager, "C");
+        List<String> cleanUrls = urls instanceof List ? normalizeUrls((List<?>) urls) : new ArrayList<String>();
+        Object rawTabs = null;
+        try {
+            rawTabs = XposedHelpers.getObjectField(manager, "c");
+        } catch (Throwable ignored) {
+        }
+        List<?> tabs = rawTabs instanceof List ? (List<?>) rawTabs : null;
+        for (int i = 0; i < cleanUrls.size(); i++) {
+            String url = cleanUrls.get(i);
+            String title = null;
+            if (tabs != null && i < tabs.size()) {
+                title = titleFromViaTab(tabs.get(i));
+            }
+            if (title == null || title.trim().length() == 0) {
+                title = titleFromUrl(url);
+            }
+            records.add(new TabRecord(i, title, url));
+        }
+        return records;
+    }
+
+    private static String titleFromViaTab(Object tab) {
+        try {
+            Object webView = XposedHelpers.callMethod(tab, "d");
+            if (webView != null) {
+                Object title = XposedHelpers.callMethod(webView, "getTitle");
+                if (title instanceof String && ((String) title).trim().length() > 0) {
+                    return ((String) title).trim();
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            Object state = XposedHelpers.callMethod(tab, "f");
+            if (state instanceof Bundle) {
+                String title = ((Bundle) state).getString("title");
+                if (title != null && title.trim().length() > 0) {
+                    return title.trim();
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private static String titleFromUrl(String url) {
+        try {
+            Uri uri = Uri.parse(url);
+            String host = uri.getHost();
+            if (host != null && host.length() > 0) {
+                return host;
+            }
+        } catch (Throwable ignored) {
+        }
+        return url;
+    }
+
+    private static BookmarkSaveResult saveTabsToViaBookmarks(String folderName, List<TabRecord> tabs) throws Exception {
+        BookmarkSaveResult result = new BookmarkSaveResult();
+        if (appContext == null || tabs.isEmpty()) {
+            return result;
+        }
+        SQLiteDatabase db = appContext.openOrCreateDatabase("via", Context.MODE_PRIVATE, null);
+        ensureBookmarkTables(db);
+        db.beginTransaction();
+        try {
+            String folderId = ensureBookmarkFolder(db, folderName);
+            int ordering = maxOrdering(db, "bookmark_items", "folder_id", folderId) + 1;
+            long now = System.currentTimeMillis() / 1000L;
+            for (TabRecord tab : tabs) {
+                if (!isBookmarkableUrl(tab.url)) {
+                    result.skipped++;
+                    continue;
+                }
+                if (bookmarkExists(db, folderId, tab.url)) {
+                    result.skipped++;
+                    continue;
+                }
+                ContentValues values = new ContentValues();
+                values.put("_id", UUID.randomUUID().toString());
+                values.put("url", tab.url);
+                values.put("title", tab.title);
+                values.put("folder_id", folderId);
+                values.put("ordering", ordering++);
+                values.put("created_at", now);
+                values.put("last_updated_at", now);
+                long row = db.insert("bookmark_items", null, values);
+                if (row >= 0) {
+                    result.inserted++;
+                } else {
+                    result.skipped++;
+                }
+            }
+            db.setTransactionSuccessful();
+            result.folderId = folderId;
+        } finally {
+            db.endTransaction();
+        }
+        return result;
+    }
+
+    private static boolean isBookmarkableUrl(String url) {
+        if (url == null) {
+            return false;
+        }
+        String normalized = url.trim().toLowerCase();
+        return normalized.startsWith("http://") || normalized.startsWith("https://");
+    }
+
+    private static void ensureBookmarkTables(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS bookmark_items(_id TEXT PRIMARY KEY,url TEXT,title TEXT,folder_id TEXT,ordering INTEGER,last_updated_at INTEGER DEFAULT 0,created_at INTEGER DEFAULT 0)");
+        db.execSQL("CREATE TABLE IF NOT EXISTS bookmark_folders(_id TEXT PRIMARY KEY,title TEXT,parent_folder_id TEXT,ordering INTEGER,created_at INTEGER DEFAULT 0,last_updated_at INTEGER DEFAULT 0)");
+    }
+
+    private static String ensureBookmarkFolder(SQLiteDatabase db, String folderName) {
+        String safeName = folderName == null || folderName.trim().length() == 0 ? "ViaTabsAgent" : folderName.trim();
+        String existing = findBookmarkFolder(db, safeName, "");
+        if (existing != null) {
+            return existing;
+        }
+        String id = UUID.randomUUID().toString();
+        long now = System.currentTimeMillis() / 1000L;
+        ContentValues values = new ContentValues();
+        values.put("_id", id);
+        values.put("title", safeName);
+        values.put("parent_folder_id", "");
+        values.put("ordering", maxOrdering(db, "bookmark_folders", "parent_folder_id", "") + 1);
+        values.put("created_at", now);
+        values.put("last_updated_at", now);
+        db.insert("bookmark_folders", null, values);
+        return id;
+    }
+
+    private static String findBookmarkFolder(SQLiteDatabase db, String title, String parentId) {
+        Cursor cursor = null;
+        try {
+            cursor = db.query("bookmark_folders", new String[]{"_id"}, "title = ? AND parent_folder_id = ?",
+                    new String[]{title, parentId}, null, null, null, "1");
+            if (cursor.moveToFirst()) {
+                return cursor.getString(0);
+            }
+        } finally {
+            if (cursor != null) {
+                cursor.close();
+            }
+        }
+        return null;
+    }
+
+    private static boolean bookmarkExists(SQLiteDatabase db, String folderId, String url) {
+        Cursor cursor = null;
+        try {
+            cursor = db.query("bookmark_items", new String[]{"_id"}, "folder_id = ? AND url = ?",
+                    new String[]{folderId, url}, null, null, null, "1");
+            return cursor.moveToFirst();
+        } finally {
+            if (cursor != null) {
+                cursor.close();
+            }
+        }
+    }
+
+    private static int maxOrdering(SQLiteDatabase db, String table, String parentColumn, String parentValue) {
+        Cursor cursor = null;
+        try {
+            cursor = db.rawQuery("SELECT MAX(ordering) FROM " + table + " WHERE " + parentColumn + " = ?",
+                    new String[]{parentValue});
+            if (cursor.moveToFirst() && !cursor.isNull(0)) {
+                return cursor.getInt(0);
+            }
+        } finally {
+            if (cursor != null) {
+                cursor.close();
+            }
+        }
+        return -1;
+    }
+
+    private static void writeBookmarkSaveSnapshot(String folderName, List<TabRecord> tabs, BookmarkSaveResult result) {
+        try {
+            JSONObject root = baseSnapshot("bookmarks.saveTabs");
+            root.put("folder", folderName);
+            root.put("folderId", result.folderId == null ? JSONObject.NULL : result.folderId);
+            root.put("inserted", result.inserted);
+            root.put("skipped", result.skipped);
+            root.put("tabs", toTabRecordArray(tabs));
+            writeJsonToFile(new File(agentDir(), "saved-bookmarks.json"), root.toString(2));
+        } catch (Throwable t) {
+            log("write bookmark save snapshot failed: " + t);
+        }
+    }
+
+    private static void writeTabGroupSnapshot(String groupName, List<TabRecord> tabs, BookmarkSaveResult result) {
+        try {
+            JSONObject group = baseSnapshot("tabs.group");
+            group.put("group", groupName);
+            group.put("folderId", result.folderId == null ? JSONObject.NULL : result.folderId);
+            group.put("inserted", result.inserted);
+            group.put("skipped", result.skipped);
+            group.put("tabs", toTabRecordArray(tabs));
+
+            File file = new File(agentDir(), "tab-groups.json");
+            JSONArray groups = new JSONArray();
+            if (file.exists() && file.length() > 0 && file.length() <= 1024 * 1024) {
+                JSONObject existing = readJsonFile(file);
+                JSONArray oldGroups = existing.optJSONArray("groups");
+                if (oldGroups != null) {
+                    for (int i = 0; i < oldGroups.length(); i++) {
+                        groups.put(oldGroups.get(i));
+                    }
+                }
+            }
+            groups.put(group);
+            JSONObject root = baseSnapshot("tabs.groups");
+            root.put("groups", groups);
+            writeJsonToFile(file, root.toString(2));
+        } catch (Throwable t) {
+            log("write tab group snapshot failed: " + t);
+        }
+    }
+
+    private static JSONObject readJsonFile(File file) throws Exception {
+        byte[] data = new byte[(int) file.length()];
+        FileInputStream stream = new FileInputStream(file);
+        try {
+            int offset = 0;
+            while (offset < data.length) {
+                int read = stream.read(data, offset, data.length - offset);
+                if (read < 0) {
+                    break;
+                }
+                offset += read;
+            }
+        } finally {
+            stream.close();
+        }
+        return new JSONObject(new String(data, StandardCharsets.UTF_8));
+    }
+
+    private static JSONArray toTabRecordArray(List<TabRecord> records) throws Exception {
+        JSONArray tabs = new JSONArray();
+        for (TabRecord record : records) {
+            JSONObject tab = new JSONObject();
+            tab.put("index", record.index);
+            tab.put("title", record.title);
+            tab.put("url", record.url);
+            tabs.put(tab);
+        }
+        return tabs;
     }
 
     private static JSONObject baseSnapshot(String source) throws Exception {
@@ -646,5 +958,23 @@ public class Hook implements IXposedHookLoadPackage {
     private static void log(String message) {
         Log.i(TAG, message);
         XposedBridge.log(TAG + ": " + message);
+    }
+
+    private static final class TabRecord {
+        final int index;
+        final String title;
+        final String url;
+
+        TabRecord(int index, String title, String url) {
+            this.index = index;
+            this.title = title;
+            this.url = url;
+        }
+    }
+
+    private static final class BookmarkSaveResult {
+        String folderId;
+        int inserted;
+        int skipped;
     }
 }

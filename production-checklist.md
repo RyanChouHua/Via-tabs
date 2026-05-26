@@ -136,3 +136,59 @@ adb pull /storage/emulated/0/Android/data/mark.via.gp/files/ViaTabsAgent/tabs.js
 - Via 新版本混淆名可能变化。
 - Android 11+ 对外部存储、包可见性、后台限制更严格。
 - 非 root 重打包会涉及签名变化，可能影响升级和数据保留。
+
+## 当前生产增强验证命令
+
+构建 agent：
+
+```powershell
+$env:JAVA_HOME='C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot'
+$env:ANDROID_HOME='C:\A_Program\Env\android-sdk'
+$env:ANDROID_SDK_ROOT='C:\A_Program\Env\android-sdk'
+$env:Path="$env:JAVA_HOME\bin;$env:ANDROID_HOME\platform-tools;$env:Path"
+.\research\BetterVia\gradlew.bat -p .\ViaTabsAgent assembleDebug
+```
+
+使用 LSPatch 将 agent 集成进 Via 7.0.0 GP APK：
+
+```powershell
+& 'C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot\bin\java.exe' `
+  -jar '.\tools\lspatch\lspatch.jar' `
+  -f `
+  -o '.\out\lspatch' `
+  -m '.\ViaTabsAgent\app\build\outputs\apk\debug\app-debug.apk' `
+  '.\research\BetterVia\Monet_GP\Via_7.0.0_GP_Moneted.apk'
+```
+
+安装并验证读取标签、保存书签、创建分组：
+
+```powershell
+$adb='C:\A_Program\Env\android-sdk\platform-tools\adb.exe'
+$serial='emulator-5556'
+
+& $adb -s $serial install -r '.\out\lspatch\Via_7.0.0_GP_Moneted-398-lspatched.apk'
+& $adb -s $serial shell logcat -c
+& $adb -s $serial shell monkey -p mark.via.gp -c android.intent.category.LAUNCHER 1
+Start-Sleep -Seconds 10
+& $adb -s $serial shell am broadcast -a com.viatabs.agent.SAVE_TABS_TO_BOOKMARKS --es folder ViaTabsAgent
+Start-Sleep -Seconds 3
+& $adb -s $serial shell am broadcast -a com.viatabs.agent.GROUP_TABS --es group SessionGroup --ez bookmarks true
+Start-Sleep -Seconds 3
+& $adb -s $serial shell logcat -d -s ViaTabsAgent LSPosed-Bridge
+& $adb -s $serial shell cat /sdcard/Android/data/mark.via.gp/files/ViaTabsAgent/saved-bookmarks.json
+& $adb -s $serial shell cat /sdcard/Android/data/mark.via.gp/files/ViaTabsAgent/tab-groups.json
+```
+
+验收标准：
+
+- logcat 出现 `saved tabs to bookmarks`。
+- logcat 出现 `grouped tabs`。
+- `saved-bookmarks.json` 包含当前标签页快照、目标书签文件夹、`inserted` 和 `skipped` 统计。
+- `tab-groups.json` 追加当前分组快照。
+- `file://` 等 Via 内部页面不写入原生书签，但仍保留在分组 JSON 中。
+
+注意事项：
+
+- `am broadcast --es folder` 和 `--es group` 的值尽量不要包含空格；Windows/ADB shell 多层转义容易导致参数被拆开。
+- 首次 `pm clear mark.via.gp` 后 Via 会进入欢迎页，需要先点同意，再等待标签管理器初始化。
+- Android 15 模拟器与当前 LSPatch 版本兼容性较差；当前验证优先使用 Android 13 模拟器。

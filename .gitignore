@@ -1,0 +1,24 @@
+# Build outputs
+**/build/
+**/.gradle/
+out/
+
+# Android generated/local files
+*.apk
+*.ap_
+*.aab
+*.dex
+*.class
+local.properties
+
+# Reverse-engineering outputs and third-party clones
+research/
+
+# Tool binaries kept locally
+tools/adb/
+tools/lspatch/*.jar
+
+# Local captures and temporary outputs
+*.png
+*.log
+*.tmp

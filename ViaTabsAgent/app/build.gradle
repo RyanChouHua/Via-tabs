@@ -1,0 +1,21 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.viatabs.agent"
+    compileSdk 33
+    buildToolsVersion "33.0.2"
+
+    defaultConfig {
+        applicationId "com.viatabs.agent"
+        minSdk 23
+        targetSdk 35
+        versionCode 1
+        versionName "0.1.0"
+    }
+}
+
+dependencies {
+    compileOnly fileTree(dir: "libs/compile_only", include: ["*.jar"])
+}

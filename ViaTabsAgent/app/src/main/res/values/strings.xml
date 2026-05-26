@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">ViaTabsAgent</string>
+    <string name="xposed_description">Export Via Browser open tabs.</string>
+</resources>

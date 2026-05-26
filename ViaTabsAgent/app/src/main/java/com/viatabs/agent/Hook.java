@@ -962,8 +962,9 @@ public class Hook implements IXposedHookLoadPackage {
             root.put("inserted", result.inserted);
             root.put("skipped", result.skipped);
             root.put("tabs", toTabRecordArray(tabs));
-            root.put("exportPath", "Download/ViaTabsAgent/saved-bookmarks.json");
-            return writeJsonToDownloadsNow("saved-bookmarks.json", root.toString(2));
+            String fileName = "saved-bookmarks-" + System.currentTimeMillis() + ".json";
+            root.put("exportPath", "Download/ViaTabsAgent/" + fileName);
+            return writeJsonToDownloadsNow(fileName, root.toString(2));
         } catch (Throwable t) {
             log("write bookmark save snapshot failed: " + t);
             return null;
@@ -1538,10 +1539,44 @@ public class Hook implements IXposedHookLoadPackage {
         if (appContext == null) {
             return null;
         }
-        if (Build.VERSION.SDK_INT >= 29) {
-            return writeJsonToDownloadsWithMediaStore(fileName, payload);
+        String path = writeJsonToDownloadsViaProvider(fileName, payload);
+        if (path != null) {
+            return path;
         }
-        return writeJsonToLegacyDownloads(fileName, payload);
+        try {
+            return AgentStore.writeDownloadFile(appContext, fileName, payload);
+        } catch (Throwable t) {
+            log("write Download fallback failed: " + t);
+            return null;
+        }
+    }
+
+    private static String writeJsonToDownloadsViaProvider(String fileName, String payload) {
+        try {
+            Bundle extras = new Bundle();
+            extras.putString(ExportProvider.EXTRA_FILE_NAME, fileName);
+            extras.putString(ExportProvider.EXTRA_PAYLOAD, payload);
+            Bundle result = appContext.getContentResolver().call(AgentStore.EXPORT_URI,
+                    ExportProvider.METHOD_WRITE_FILE, null, extras);
+            if (result == null) {
+                log("module export provider returned null");
+                return null;
+            }
+            String error = result.getString("error");
+            if (error != null && error.length() > 0) {
+                log("module export provider failed: " + error);
+                return null;
+            }
+            String path = result.getString(ExportProvider.EXTRA_PATH);
+            if (path != null && path.length() > 0) {
+                log("wrote " + path + " via module provider");
+                return path;
+            }
+        } catch (Throwable t) {
+            Log.i(TAG, "module export provider unavailable: " + t);
+            XposedBridge.log(TAG + ": module export provider unavailable: " + t);
+        }
+        return null;
     }
 
     private static String writeJsonToDownloadsWithMediaStore(String fileName, String payload) {
@@ -1611,6 +1646,20 @@ public class Hook implements IXposedHookLoadPackage {
     private static void log(String message) {
         Log.i(TAG, message);
         XposedBridge.log(TAG + ": " + message);
+        appendModuleLog(message);
+    }
+
+    private static void appendModuleLog(String message) {
+        if (appContext == null || message == null) {
+            return;
+        }
+        try {
+            Bundle extras = new Bundle();
+            extras.putString(ExportProvider.EXTRA_MESSAGE, message);
+            appContext.getContentResolver().call(AgentStore.LOG_URI,
+                    ExportProvider.METHOD_APPEND_LOG, null, extras);
+        } catch (Throwable ignored) {
+        }
     }
 
     private static final class TabRecord {

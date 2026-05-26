@@ -401,6 +401,8 @@ public class MainActivity extends Activity {
                         AgentStore.setPanelColor(MainActivity.this, color);
                         AgentStore.setPanelAlpha(MainActivity.this, alpha.getProgress() + 20);
                         AgentStore.setPanelSize(MainActivity.this, size.getProgress() + 28);
+                        syncPanelStyleToProvider(color, alpha.getProgress() + 20, size.getProgress() + 28);
+                        sendPanelStyleRefresh();
                         AgentStore.appendLog(MainActivity.this, "悬浮按钮样式: color=" + color
                                 + " size=" + AgentStore.getPanelSize(MainActivity.this)
                                 + " alpha=" + AgentStore.getPanelAlpha(MainActivity.this));
@@ -409,6 +411,33 @@ public class MainActivity extends Activity {
                     }
                 })
                 .show();
+    }
+
+    private void syncPanelStyleToProvider(String color, int alpha, int size) {
+        try {
+            Bundle extras = new Bundle();
+            extras.putString(ExportProvider.EXTRA_PANEL_COLOR, color);
+            extras.putInt(ExportProvider.EXTRA_PANEL_ALPHA, alpha);
+            extras.putInt(ExportProvider.EXTRA_PANEL_SIZE, size);
+            getContentResolver().call(AgentStore.EXPORT_URI,
+                    ExportProvider.METHOD_SET_PANEL_STYLE, null, extras);
+        } catch (Throwable t) {
+            AgentStore.appendLog(this, "sync panel style failed: " + t);
+        }
+    }
+
+    private void sendPanelStyleRefresh() {
+        sendPanelStyleRefresh("mark.via");
+        sendPanelStyleRefresh("mark.via.gp");
+    }
+
+    private void sendPanelStyleRefresh(String packageName) {
+        try {
+            Intent intent = new Intent(Hook.ACTION_REFRESH_PANEL_STYLE);
+            intent.setPackage(packageName);
+            sendBroadcast(intent);
+        } catch (Throwable ignored) {
+        }
     }
 
     private void addStyleSwatch(LinearLayout row, final List<TextView> swatches,

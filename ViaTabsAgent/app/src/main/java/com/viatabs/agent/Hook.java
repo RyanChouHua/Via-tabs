@@ -25,8 +25,12 @@ import android.util.Log;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.webkit.WebView;
+import android.widget.Adapter;
+import android.widget.AdapterView;
+import android.widget.BaseAdapter;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -81,6 +85,7 @@ public class Hook implements IXposedHookLoadPackage {
     private static volatile Method switchTabMethod;
     private static volatile Method sessionBundleMethod;
     private static final WeakHashMap<Activity, View> PANEL_BUTTONS = new WeakHashMap<Activity, View>();
+    private static final WeakHashMap<Activity, Boolean> ACTIVE_ACTIVITIES = new WeakHashMap<Activity, Boolean>();
     private static final ExecutorService WRITER = Executors.newSingleThreadExecutor();
     private static final ThreadLocal<Boolean> IN_MANAGER_SNAPSHOT = new ThreadLocal<Boolean>();
     private static final ThreadLocal<Boolean> IN_WEBVIEW_CAPTURE = new ThreadLocal<Boolean>();
@@ -88,6 +93,8 @@ public class Hook implements IXposedHookLoadPackage {
     private static final Map<String, Long> LAST_WRITE_AT = new HashMap<String, Long>();
     private static final Map<String, Long> LAST_FILE_LOG_AT = new HashMap<String, Long>();
     private static final Map<String, String> WEBVIEW_TITLES = new HashMap<String, String>();
+    private static volatile boolean tabCaptureCleared;
+    private static volatile long tabCacheGeneration;
     private static final long MIN_WRITE_INTERVAL_MS = 1000L;
     private static final long SNAPSHOT_LOG_INTERVAL_MS = 10000L;
     private static final String ACTION_OPEN_TEST_TABS = "com.viatabs.agent.OPEN_TEST_TABS";
@@ -97,9 +104,15 @@ public class Hook implements IXposedHookLoadPackage {
     private static final String ACTION_CLOSE_VIA = "com.viatabs.agent.CLOSE_VIA";
     private static final String ACTION_RESTORE_AGENT_SESSION = "com.viatabs.agent.RESTORE_AGENT_SESSION";
     private static final String ACTION_SAVE_TABS_TO_BOOKMARKS = "com.viatabs.agent.SAVE_TABS_TO_BOOKMARKS";
+    static final String ACTION_REFRESH_PANEL_STYLE = "com.viatabs.agent.REFRESH_PANEL_STYLE";
     static final String ACTION_IMPORT_EXPORT_GROUPS = "com.viatabs.agent.IMPORT_EXPORT_GROUPS";
     static final String EXTRA_JSON_NAMES = "jsonNames";
     static final String EXTRA_HTML_NAMES = "htmlNames";
+    private static final String LOCAL_PREFS = "via_tabs_agent_local";
+    private static final String LOCAL_PANEL_COLOR = "panel_color";
+    private static final String LOCAL_PANEL_ALPHA = "panel_alpha";
+    private static final String LOCAL_PANEL_SIZE = "panel_size";
+    private static volatile long pendingBookmarkRefreshAt;
     private static final int PANEL_STATE_DEFAULT = 0;
     private static final int PANEL_STATE_READING = 1;
     private static final int PANEL_STATE_CONFIRM = 2;
@@ -141,7 +154,22 @@ public class Hook implements IXposedHookLoadPackage {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     if (param.thisObject instanceof Activity) {
-                        maybeInstallPanelButton((Activity) param.thisObject);
+                        Activity activity = (Activity) param.thisObject;
+                        synchronized (ACTIVE_ACTIVITIES) {
+                            ACTIVE_ACTIVITIES.put(activity, Boolean.TRUE);
+                        }
+                        maybeInstallPanelButton(activity);
+                        maybeRefreshBookmarkActivity(activity, "onResume");
+                    }
+                }
+            });
+            XposedHelpers.findAndHookMethod(Activity.class, "onDestroy", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (param.thisObject instanceof Activity) {
+                        synchronized (ACTIVE_ACTIVITIES) {
+                            ACTIVE_ACTIVITIES.remove((Activity) param.thisObject);
+                        }
                     }
                 }
             });
@@ -205,6 +233,7 @@ public class Hook implements IXposedHookLoadPackage {
         filter.addAction(ACTION_CLOSE_VIA);
         filter.addAction(ACTION_RESTORE_AGENT_SESSION);
         filter.addAction(ACTION_SAVE_TABS_TO_BOOKMARKS);
+        filter.addAction(ACTION_REFRESH_PANEL_STYLE);
         filter.addAction(ACTION_IMPORT_EXPORT_GROUPS);
 
         BroadcastReceiver receiver = new BroadcastReceiver() {
@@ -235,6 +264,8 @@ public class Hook implements IXposedHookLoadPackage {
                     }
                     String folder = intent.getStringExtra("folder");
                     saveCurrentTabsToBookmarks(folder == null ? "书签" : folder);
+                } else if (ACTION_REFRESH_PANEL_STYLE.equals(action)) {
+                    refreshPanelButtons();
                 } else if (ACTION_IMPORT_EXPORT_GROUPS.equals(action)) {
                     importExportGroups(intent);
                 }
@@ -371,6 +402,8 @@ public class Hook implements IXposedHookLoadPackage {
                 private float startX;
                 private float startY;
                 private boolean dragging;
+                private boolean longPressTriggered;
+                private Runnable longPressRunnable;
 
                 @Override
                 public boolean onTouch(View v, MotionEvent event) {
@@ -384,12 +417,27 @@ public class Hook implements IXposedHookLoadPackage {
                             startX = button.getX();
                             startY = button.getY();
                             dragging = false;
+                            longPressTriggered = false;
+                            longPressRunnable = new Runnable() {
+                                @Override
+                                public void run() {
+                                    if (!dragging && button.isEnabled()) {
+                                        longPressTriggered = true;
+                                        showPanelActionDialog(button, activity);
+                                    }
+                                }
+                            };
+                            if (mainHandler != null) {
+                                mainHandler.postDelayed(longPressRunnable,
+                                        ViewConfiguration.getLongPressTimeout());
+                            }
                             return true;
                         case MotionEvent.ACTION_MOVE:
                             float dx = event.getRawX() - downRawX;
                             float dy = event.getRawY() - downRawY;
                             if (!dragging && Math.hypot(dx, dy) > dp(activity, 6)) {
                                 dragging = true;
+                                cancelLongPress(longPressRunnable);
                             }
                             if (dragging) {
                                 movePanelButton(button, startX + dx, startY + dy);
@@ -397,8 +445,11 @@ public class Hook implements IXposedHookLoadPackage {
                             return true;
                         case MotionEvent.ACTION_UP:
                         case MotionEvent.ACTION_CANCEL:
+                            cancelLongPress(longPressRunnable);
                             if (dragging) {
                                 savePanelPosition(button, activity);
+                            } else if (longPressTriggered) {
+                                longPressTriggered = false;
                             } else if (event.getActionMasked() == MotionEvent.ACTION_UP) {
                                 button.performClick();
                             }
@@ -422,6 +473,36 @@ public class Hook implements IXposedHookLoadPackage {
         }
         log("panel export clicked");
         previewCurrentTabsToBookmarks(button, activity);
+    }
+
+    private static void cancelLongPress(Runnable runnable) {
+        Handler handler = mainHandler;
+        if (handler != null && runnable != null) {
+            handler.removeCallbacks(runnable);
+        }
+    }
+
+    private static void showPanelActionDialog(final TextView button, final Activity activity) {
+        if (activity == null || activity.isFinishing()) {
+            return;
+        }
+        try {
+            new AlertDialog.Builder(activity)
+                    .setTitle("悬浮按钮")
+                    .setItems(new String[]{"清空已加载可保存标签"}, new DialogInterface.OnClickListener() {
+                        @Override
+                        public void onClick(DialogInterface dialog, int which) {
+                            if (which == 0) {
+                                clearLoadedSavableTabs(activity);
+                                resetPanelButtonLater(button, 0L);
+                            }
+                        }
+                    })
+                    .setNegativeButton("取消", null)
+                    .show();
+        } catch (Throwable t) {
+            log("show panel action dialog failed: " + t);
+        }
     }
 
     private static void restorePanelPosition(final TextView button, final Activity activity) {
@@ -489,6 +570,225 @@ public class Hook implements IXposedHookLoadPackage {
         }
     }
 
+    private static void refreshPanelButtons() {
+        Handler handler = mainHandler;
+        if (handler == null) {
+            return;
+        }
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                ExportSettings settings = readExportSettings();
+                ArrayList<Map.Entry<Activity, View>> entries =
+                        new ArrayList<Map.Entry<Activity, View>>(PANEL_BUTTONS.entrySet());
+                for (Map.Entry<Activity, View> entry : entries) {
+                    Activity activity = entry.getKey();
+                    View view = entry.getValue();
+                    if (activity == null || activity.isFinishing() || !(view instanceof TextView)) {
+                        continue;
+                    }
+                    TextView button = (TextView) view;
+                    applyPanelButtonStyle(button, PANEL_STATE_DEFAULT);
+                    ViewGroup.LayoutParams params = button.getLayoutParams();
+                    if (params != null) {
+                        int size = dp(button.getContext(), settings.panelSize);
+                        params.width = size;
+                        params.height = size;
+                        button.setLayoutParams(params);
+                    }
+                    movePanelButton(button, button.getX(), button.getY());
+                }
+                log("panel buttons refreshed");
+            }
+        });
+    }
+
+    private static void clearLoadedSavableTabs(final Context context) {
+        tabCaptureCleared = true;
+        tabCacheGeneration++;
+        WRITER.execute(new Runnable() {
+            @Override
+            public void run() {
+                int cleared = 0;
+                try {
+                    File dir = agentDir();
+                    cleared += deleteCacheFile(new File(dir, "tabs.json"));
+                    cleared += deleteCacheFile(new File(dir, "webview-fallback.json"));
+                    cleared += deleteCacheFile(new File(dir, "agent-session.json"));
+                    synchronized (LAST_PAYLOAD) {
+                        LAST_PAYLOAD.clear();
+                        LAST_WRITE_AT.clear();
+                    }
+                    synchronized (WEBVIEW_TITLES) {
+                        WEBVIEW_TITLES.clear();
+                    }
+                    log("cleared loaded savable tabs: files=" + cleared
+                            + " generation=" + tabCacheGeneration);
+                    toast(context, "已清空已加载可保存标签");
+                } catch (Throwable t) {
+                    log("clear loaded savable tabs failed: " + t);
+                    toast(context, "清空失败：" + shortError(t));
+                }
+            }
+        });
+    }
+
+    private static int deleteCacheFile(File file) {
+        if (file == null || !file.exists()) {
+            return 0;
+        }
+        return file.delete() ? 1 : 0;
+    }
+
+    private static void markTabCaptureActive(String reason) {
+        if (!tabCaptureCleared) {
+            return;
+        }
+        tabCaptureCleared = false;
+        log("tab capture resumed: " + reason);
+    }
+
+    private static void notifyBookmarksChanged(String source, int inserted, int skipped) {
+        if (appContext == null) {
+            return;
+        }
+        pendingBookmarkRefreshAt = System.currentTimeMillis() + 30000L;
+        try {
+            appContext.getContentResolver().notifyChange(Uri.parse("content://" + appContext.getPackageName() + "/bookmark_items"), null);
+            appContext.getContentResolver().notifyChange(Uri.parse("content://" + appContext.getPackageName() + "/bookmark_folders"), null);
+            appContext.getContentResolver().notifyChange(Uri.parse("content://mark.via/bookmark_items"), null);
+            appContext.getContentResolver().notifyChange(Uri.parse("content://mark.via/bookmark_folders"), null);
+        } catch (Throwable t) {
+            log("notify bookmark uri failed: " + t);
+        }
+        Handler handler = mainHandler;
+        if (handler != null) {
+            handler.post(new Runnable() {
+                @Override
+                public void run() {
+                    refreshVisibleBookmarkActivities("notify");
+                }
+            });
+            handler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    refreshVisibleBookmarkActivities("notify.delayed");
+                }
+            }, 600L);
+        }
+        log("bookmarks changed: source=" + source + " inserted=" + inserted + " skipped=" + skipped);
+    }
+
+    private static void refreshVisibleBookmarkActivities(String reason) {
+        ArrayList<Activity> activities;
+        synchronized (ACTIVE_ACTIVITIES) {
+            activities = new ArrayList<Activity>(ACTIVE_ACTIVITIES.keySet());
+        }
+        for (Activity activity : activities) {
+            maybeRefreshBookmarkActivity(activity, reason);
+        }
+    }
+
+    private static void maybeRefreshBookmarkActivity(final Activity activity, String reason) {
+        if (activity == null || activity.isFinishing()) {
+            return;
+        }
+        if (System.currentTimeMillis() > pendingBookmarkRefreshAt) {
+            return;
+        }
+        try {
+            View root = activity.findViewById(android.R.id.content);
+            int adapterRefreshes = notifyAdapters(root);
+            boolean shouldRecreate = looksLikeBookmarkActivity(activity, root)
+                    || (adapterRefreshes > 0 && !viewTreeContainsWebView(root));
+            if (!shouldRecreate) {
+                if (adapterRefreshes > 0) {
+                    log("notified adapters after bookmark import: activity="
+                            + activity.getClass().getName() + " count=" + adapterRefreshes + " reason=" + reason);
+                }
+                return;
+            }
+            pendingBookmarkRefreshAt = 0L;
+            log("refresh bookmark activity after import: " + activity.getClass().getName()
+                    + " adapterRefreshes=" + adapterRefreshes + " reason=" + reason);
+            activity.recreate();
+        } catch (Throwable t) {
+            log("refresh bookmark activity failed: " + t);
+        }
+    }
+
+    private static int notifyAdapters(View view) {
+        if (view == null) {
+            return 0;
+        }
+        int count = 0;
+        if (view instanceof AdapterView) {
+            try {
+                Adapter adapter = ((AdapterView<?>) view).getAdapter();
+                if (adapter instanceof BaseAdapter) {
+                    ((BaseAdapter) adapter).notifyDataSetChanged();
+                    count++;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                count += notifyAdapters(group.getChildAt(i));
+            }
+        }
+        return count;
+    }
+
+    private static boolean looksLikeBookmarkActivity(Activity activity, View root) {
+        String className = activity.getClass().getName().toLowerCase(Locale.US);
+        if (className.contains("bookmark") || className.contains("favorite")) {
+            return true;
+        }
+        return viewTreeContainsText(root, "书签") || viewTreeContainsText(root, "收藏")
+                || viewTreeContainsText(root, "Bookmarks") || viewTreeContainsText(root, "Favorite");
+    }
+
+    private static boolean viewTreeContainsText(View view, String needle) {
+        if (view == null || needle == null || needle.length() == 0) {
+            return false;
+        }
+        if (view instanceof TextView) {
+            CharSequence text = ((TextView) view).getText();
+            if (text != null && text.toString().contains(needle)) {
+                return true;
+            }
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                if (viewTreeContainsText(group.getChildAt(i), needle)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean viewTreeContainsWebView(View view) {
+        if (view == null) {
+            return false;
+        }
+        if (view instanceof WebView) {
+            return true;
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                if (viewTreeContainsWebView(group.getChildAt(i))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private static boolean isExportEnabled() {
         return readExportSettings().panelEnabled;
     }
@@ -505,10 +805,9 @@ public class Hook implements IXposedHookLoadPackage {
                     null,
                     null);
             if (result == null) {
-                return new ExportSettings(true, true, true, false,
-                        AgentStore.PANEL_COLOR_BLUE, 92, 40);
+                return readLocalExportSettings();
             }
-            return new ExportSettings(
+            ExportSettings settings = new ExportSettings(
                     result.getBoolean(ExportProvider.EXTRA_PANEL_ENABLED, true),
                     true,
                     result.getBoolean(ExportProvider.EXTRA_BOOKMARK_IMPORT_ENABLED, true),
@@ -516,10 +815,45 @@ public class Hook implements IXposedHookLoadPackage {
                     result.getString(ExportProvider.EXTRA_PANEL_COLOR, AgentStore.PANEL_COLOR_BLUE),
                     result.getInt(ExportProvider.EXTRA_PANEL_ALPHA, 92),
                     result.getInt(ExportProvider.EXTRA_PANEL_SIZE, 40));
+            saveLocalPanelStyle(settings);
+            return settings;
         } catch (Throwable t) {
-            log("read export settings failed, default enabled: " + t);
+            log("read export settings failed, using local cache: " + t);
+            return readLocalExportSettings();
+        }
+    }
+
+    private static ExportSettings readLocalExportSettings() {
+        if (appContext == null) {
             return new ExportSettings(true, true, true, false,
                     AgentStore.PANEL_COLOR_BLUE, 92, 40);
+        }
+        try {
+            return new ExportSettings(true, true, true, false,
+                    appContext.getSharedPreferences(LOCAL_PREFS, Context.MODE_PRIVATE)
+                            .getString(LOCAL_PANEL_COLOR, AgentStore.PANEL_COLOR_BLUE),
+                    appContext.getSharedPreferences(LOCAL_PREFS, Context.MODE_PRIVATE)
+                            .getInt(LOCAL_PANEL_ALPHA, 92),
+                    appContext.getSharedPreferences(LOCAL_PREFS, Context.MODE_PRIVATE)
+                            .getInt(LOCAL_PANEL_SIZE, 40));
+        } catch (Throwable t) {
+            return new ExportSettings(true, true, true, false,
+                    AgentStore.PANEL_COLOR_BLUE, 92, 40);
+        }
+    }
+
+    private static void saveLocalPanelStyle(ExportSettings settings) {
+        if (appContext == null || settings == null) {
+            return;
+        }
+        try {
+            appContext.getSharedPreferences(LOCAL_PREFS, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(LOCAL_PANEL_COLOR, settings.panelColor)
+                    .putInt(LOCAL_PANEL_ALPHA, settings.panelAlpha)
+                    .putInt(LOCAL_PANEL_SIZE, settings.panelSize)
+                    .apply();
+        } catch (Throwable ignored) {
         }
     }
 
@@ -722,6 +1056,9 @@ public class Hook implements IXposedHookLoadPackage {
                             sessionBundleMethod = method;
                         }
                     }
+                    if ("K".equals(param.method.getName())) {
+                        markTabCaptureActive("tabManager.open");
+                    }
                     snapshotFromLastTabManager(param.method.getName());
                     if ("U".equals(param.method.getName())) {
                         scheduleAgentSessionRestore("after.U", 1200L);
@@ -896,6 +1233,9 @@ public class Hook implements IXposedHookLoadPackage {
             @Override
             protected void afterHookedMethod(MethodHookParam param) {
                 rememberTabManager(candidate, param.thisObject, "dynamic." + method.getName());
+                if (method == candidate.openMethod) {
+                    markTabCaptureActive("dynamic.open");
+                }
                 snapshotFromLastTabManager("dynamic." + method.getName());
             }
         };
@@ -1027,6 +1367,7 @@ public class Hook implements IXposedHookLoadPackage {
                         WebView webView = param.thisObject instanceof WebView ? (WebView) param.thisObject : null;
                         String url = (String) param.args[0];
                         String title = safeWebViewTitle(webView);
+                        markTabCaptureActive("webview.loadUrl");
                         rememberWebView(url, title);
                         writeSingleUrlSnapshot("androidWebView.loadUrl", url, title);
                     }
@@ -1141,7 +1482,8 @@ public class Hook implements IXposedHookLoadPackage {
             synchronized (WEBVIEW_TITLES) {
                 for (Map.Entry<String, String> entry : WEBVIEW_TITLES.entrySet()) {
                     String url = entry.getKey();
-                    if (!isMeaningfulUrl(url) || !seen.add(url)) {
+                    String key = tabUrlKey(url);
+                    if (!isMeaningfulUrl(url) || key.length() == 0 || !seen.add(key)) {
                         continue;
                     }
                     String title = entry.getValue();
@@ -1167,7 +1509,8 @@ public class Hook implements IXposedHookLoadPackage {
             String url = safeWebViewUrl(webView);
             String title = safeWebViewTitle(webView);
             rememberWebView(url, title);
-            if (isMeaningfulUrl(url) && seen.add(url)) {
+            String key = tabUrlKey(url);
+            if (isMeaningfulUrl(url) && key.length() > 0 && seen.add(key)) {
                 if (title == null || title.trim().length() == 0) {
                     title = titleFromUrl(url);
                 }
@@ -1211,12 +1554,21 @@ public class Hook implements IXposedHookLoadPackage {
     }
 
     private static void rememberWebView(String url, String title) {
+        if (tabCaptureCleared) {
+            return;
+        }
         if (!isMeaningfulUrl(url)) {
             return;
         }
         String safeTitle = title == null || title.trim().length() == 0 ? titleFromUrl(url) : title.trim();
         synchronized (WEBVIEW_TITLES) {
-            WEBVIEW_TITLES.put(url.trim(), safeTitle);
+            WEBVIEW_TITLES.put(tabUrlKey(url), safeTitle);
+        }
+    }
+
+    private static String rememberedTitle(String url) {
+        synchronized (WEBVIEW_TITLES) {
+            return WEBVIEW_TITLES.get(tabUrlKey(url));
         }
     }
 
@@ -1230,6 +1582,44 @@ public class Hook implements IXposedHookLoadPackage {
         }
         return safe.startsWith("http://") || safe.startsWith("https://")
                 || safe.startsWith("file://") || safe.startsWith("content://");
+    }
+
+    private static String tabUrlKey(String url) {
+        if (url == null) {
+            return "";
+        }
+        String safe = url.trim();
+        if (safe.length() == 0 || "null".equalsIgnoreCase(safe)) {
+            return "";
+        }
+        try {
+            Uri uri = Uri.parse(safe);
+            String scheme = uri.getScheme();
+            String host = uri.getHost();
+            if (scheme == null || host == null) {
+                return safe.toLowerCase(Locale.US);
+            }
+            Uri.Builder builder = new Uri.Builder()
+                    .scheme(scheme.toLowerCase(Locale.US))
+                    .encodedAuthority(host.toLowerCase(Locale.US)
+                            + (uri.getPort() >= 0 ? ":" + uri.getPort() : ""))
+                    .encodedPath(normalizeUrlPath(uri.getEncodedPath()))
+                    .encodedQuery(uri.getEncodedQuery());
+            return builder.build().toString();
+        } catch (Throwable ignored) {
+            return safe.toLowerCase(Locale.US);
+        }
+    }
+
+    private static String normalizeUrlPath(String path) {
+        if (path == null || path.length() == 0) {
+            return "/";
+        }
+        String normalized = path;
+        while (normalized.length() > 1 && normalized.endsWith("/")) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        return normalized;
     }
 
     private static void snapshotFromLastTabManager(String reason) {
@@ -1260,6 +1650,12 @@ public class Hook implements IXposedHookLoadPackage {
         if (!settings.tabExportEnabled && !settings.bookmarkImportEnabled) {
             log("panel preview skipped: tabExport=false bookmarkImport=false");
             toast(activity, "请先在模块中开启标签导出或标签导入到书签");
+            resetPanelButtonLater(button, 0L);
+            return;
+        }
+        if (tabCaptureCleared) {
+            log("panel preview skipped: loaded savable tabs cleared");
+            toast(activity, "已清空可保存标签，等待新加载标签");
             resetPanelButtonLater(button, 0L);
             return;
         }
@@ -1335,30 +1731,37 @@ public class Hook implements IXposedHookLoadPackage {
             resetPanelButtonLater(button, 0L);
             return;
         }
-        final BookmarkBatch batch = createBookmarkBatch(tabs, settings.domainGroupEnabled);
+        final List<TabRecord> selectableTabs = selectableBookmarkTabs(tabs);
+        if (selectableTabs.isEmpty()) {
+            log("panel preview has no bookmarkable tabs: source=" + source
+                    + " captured=" + (tabs == null ? 0 : tabs.size()));
+            toast(activity, "没有可保存的标签");
+            resetPanelButtonLater(button, 0L);
+            return;
+        }
+        final boolean[] checked = defaultCheckedTabs(selectableTabs);
+        final String[] labels = tabChoiceLabels(selectableTabs);
+        final AlertDialog[] dialogRef = new AlertDialog[1];
+        final int duplicateCount = selectableTabs.size() - countChecked(checked);
         log("panel preview ready: source=" + source + " captured=" + tabs.size()
-                + " bookmarkable=" + batch.bookmarkCount + " folder=" + batch.folderName);
-        String message = "当前捕获标签: " + tabs.size()
-                + "\n可保存标签: " + batch.bookmarkCount
-                + "\n文件夹: " + batch.folderName
-                + "\nJSON 保存: 默认"
-                + "\n导入书签: " + enabledText(settings.bookmarkImportEnabled)
-                + "\n按域名整理: " + enabledText(settings.domainGroupEnabled)
-                + "\n导出目录: Download/ViaTabsAgent";
+                + " bookmarkable=" + selectableTabs.size() + " duplicates=" + duplicateCount);
         setPanelButtonState(button, "确认", false);
         try {
-            new AlertDialog.Builder(activity)
-                    .setTitle("保存当前标签页？")
-                    .setMessage(message)
-                    .setPositiveButton("确认保存", new DialogInterface.OnClickListener() {
+            AlertDialog dialog = new AlertDialog.Builder(activity)
+                    .setTitle(savePreviewTitle(checked, selectableTabs.size(), duplicateCount))
+                    .setMultiChoiceItems(labels, checked, new DialogInterface.OnMultiChoiceClickListener() {
                         @Override
-                        public void onClick(DialogInterface dialog, int which) {
-                            log("panel preview confirmed: folder=" + batch.folderName
-                                    + " bookmarkable=" + batch.bookmarkCount);
-                            setPanelButtonState(button, "保存中", false);
-                            saveAndExportTabs(batch, tabs, activity, source, button);
+                        public void onClick(DialogInterface dialog, int which, boolean isChecked) {
+                            checked[which] = isChecked;
+                            if (isChecked) {
+                                uncheckDuplicateTabs(selectableTabs, checked, which, dialogRef[0]);
+                            }
+                            updateSavePreviewTitle(dialogRef[0], checked, selectableTabs.size(), duplicateCount);
+                            updateSelectionToggleButton(dialogRef[0], checked);
                         }
                     })
+                    .setPositiveButton("保存选中", null)
+                    .setNeutralButton("全不选", null)
                     .setNegativeButton("取消", new DialogInterface.OnClickListener() {
                         @Override
                         public void onClick(DialogInterface dialog, int which) {
@@ -1373,11 +1776,182 @@ public class Hook implements IXposedHookLoadPackage {
                             resetPanelButtonLater(button, 0L);
                         }
                     })
-                    .show();
+                    .create();
+            dialogRef[0] = dialog;
+            dialog.show();
+            updateSelectionToggleButton(dialog, checked);
+            dialog.getButton(DialogInterface.BUTTON_POSITIVE).setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    List<TabRecord> selectedTabs = selectedBookmarkTabs(selectableTabs, checked);
+                    if (selectedTabs.isEmpty()) {
+                        log("panel preview confirmed with no selected tabs");
+                        toast(activity, "请先选择要保存的标签");
+                        return;
+                    }
+                    BookmarkBatch batch = createBookmarkBatch(selectedTabs, settings.domainGroupEnabled);
+                    log("panel preview confirmed: folder=" + batch.folderName
+                            + " selected=" + selectedTabs.size());
+                    setPanelButtonState(button, "保存中", false);
+                    saveAndExportTabs(batch, selectedTabs, activity, source, button);
+                    dialog.dismiss();
+                }
+            });
+            dialog.getButton(DialogInterface.BUTTON_NEUTRAL).setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    if (countChecked(checked) == 0) {
+                        restoreDefaultSelection(selectableTabs, checked, dialog);
+                        log("panel preview selected all unique tabs");
+                    } else {
+                        clearSelection(checked, dialog);
+                        log("panel preview cleared selection");
+                    }
+                    updateSavePreviewTitle(dialog, checked, selectableTabs.size(), duplicateCount);
+                    updateSelectionToggleButton(dialog, checked);
+                }
+            });
         } catch (Throwable t) {
             log("show save preview dialog failed: " + t);
             toast(activity, "显示确认窗口失败：" + shortError(t));
             resetPanelButtonLater(button, 0L);
+        }
+    }
+
+    private static List<TabRecord> selectableBookmarkTabs(List<TabRecord> tabs) {
+        ArrayList<TabRecord> out = new ArrayList<TabRecord>();
+        if (tabs == null) {
+            return out;
+        }
+        for (TabRecord tab : tabs) {
+            if (tab != null && isBookmarkableUrl(tab.url)) {
+                out.add(new TabRecord(out.size(), tab.title, tab.url));
+            }
+        }
+        return out;
+    }
+
+    private static boolean[] defaultCheckedTabs(List<TabRecord> tabs) {
+        boolean[] checked = new boolean[tabs == null ? 0 : tabs.size()];
+        restoreDefaultSelection(tabs, checked, null);
+        return checked;
+    }
+
+    private static void restoreDefaultSelection(List<TabRecord> tabs, boolean[] checked, AlertDialog dialog) {
+        if (checked == null) {
+            return;
+        }
+        clearSelection(checked, dialog);
+        LinkedHashSet<String> seen = new LinkedHashSet<String>();
+        for (int i = 0; tabs != null && i < tabs.size(); i++) {
+            String key = duplicateKey(tabs.get(i).url);
+            boolean selected = key.length() > 0 && seen.add(key);
+            checked[i] = selected;
+            if (dialog != null && dialog.getListView() != null) {
+                dialog.getListView().setItemChecked(i, selected);
+            }
+        }
+    }
+
+    private static void clearSelection(boolean[] checked, AlertDialog dialog) {
+        if (checked == null) {
+            return;
+        }
+        for (int i = 0; i < checked.length; i++) {
+            checked[i] = false;
+            if (dialog != null && dialog.getListView() != null) {
+                dialog.getListView().setItemChecked(i, false);
+            }
+        }
+    }
+
+    private static String[] tabChoiceLabels(List<TabRecord> tabs) {
+        String[] labels = new String[tabs == null ? 0 : tabs.size()];
+        Map<String, Integer> counts = duplicateCounts(tabs);
+        Map<String, Integer> ordinals = new HashMap<String, Integer>();
+        for (int i = 0; tabs != null && i < tabs.size(); i++) {
+            TabRecord tab = tabs.get(i);
+            String key = duplicateKey(tab.url);
+            int count = counts.containsKey(key) ? counts.get(key).intValue() : 1;
+            int ordinal = ordinals.containsKey(key) ? ordinals.get(key).intValue() + 1 : 1;
+            ordinals.put(key, Integer.valueOf(ordinal));
+            String title = displayTitleForBookmark(tab);
+            if (title.length() == 0) {
+                title = titleFromUrl(tab.url);
+            }
+            labels[i] = (i + 1) + ". " + title + "\n" + tab.url
+                    + (count > 1 ? "  [" + ordinal + "/" + count + " 重复]" : "");
+        }
+        return labels;
+    }
+
+    private static Map<String, Integer> duplicateCounts(List<TabRecord> tabs) {
+        Map<String, Integer> counts = new HashMap<String, Integer>();
+        for (int i = 0; tabs != null && i < tabs.size(); i++) {
+            String key = duplicateKey(tabs.get(i).url);
+            Integer count = counts.get(key);
+            counts.put(key, Integer.valueOf(count == null ? 1 : count.intValue() + 1));
+        }
+        return counts;
+    }
+
+    private static String duplicateKey(String url) {
+        return tabUrlKey(url);
+    }
+
+    private static void uncheckDuplicateTabs(List<TabRecord> tabs, boolean[] checked, int keepIndex,
+                                             AlertDialog dialog) {
+        if (tabs == null || checked == null || keepIndex < 0 || keepIndex >= tabs.size()) {
+            return;
+        }
+        String key = duplicateKey(tabs.get(keepIndex).url);
+        for (int i = 0; i < tabs.size() && i < checked.length; i++) {
+            if (i != keepIndex && key.equals(duplicateKey(tabs.get(i).url))) {
+                checked[i] = false;
+                if (dialog != null && dialog.getListView() != null) {
+                    dialog.getListView().setItemChecked(i, false);
+                }
+            }
+        }
+    }
+
+    private static List<TabRecord> selectedBookmarkTabs(List<TabRecord> tabs, boolean[] checked) {
+        ArrayList<TabRecord> out = new ArrayList<TabRecord>();
+        for (int i = 0; tabs != null && checked != null && i < tabs.size() && i < checked.length; i++) {
+            TabRecord tab = tabs.get(i);
+            if (checked[i] && tab != null && isBookmarkableUrl(tab.url)) {
+                out.add(new TabRecord(out.size(), tab.title, tab.url));
+            }
+        }
+        return out;
+    }
+
+    private static int countChecked(boolean[] checked) {
+        int count = 0;
+        for (int i = 0; checked != null && i < checked.length; i++) {
+            if (checked[i]) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static String savePreviewTitle(boolean[] checked, int total, int duplicateCount) {
+        return "选择要保存的标签 " + countChecked(checked) + "/" + total
+                + (duplicateCount > 0 ? "  重复 " + duplicateCount : "");
+    }
+
+    private static void updateSavePreviewTitle(AlertDialog dialog, boolean[] checked,
+                                               int total, int duplicateCount) {
+        if (dialog != null) {
+            dialog.setTitle(savePreviewTitle(checked, total, duplicateCount));
+        }
+    }
+
+    private static void updateSelectionToggleButton(AlertDialog dialog, boolean[] checked) {
+        if (dialog != null && dialog.getButton(DialogInterface.BUTTON_NEUTRAL) != null) {
+            dialog.getButton(DialogInterface.BUTTON_NEUTRAL)
+                    .setText(countChecked(checked) == 0 ? "全选" : "全不选");
         }
     }
 
@@ -1509,6 +2083,9 @@ public class Hook implements IXposedHookLoadPackage {
         }
         final ArrayList<String> jsonNames = intent.getStringArrayListExtra(EXTRA_JSON_NAMES);
         final ArrayList<String> htmlNames = intent.getStringArrayListExtra(EXTRA_HTML_NAMES);
+        int total = Math.max(jsonNames == null ? 0 : jsonNames.size(),
+                htmlNames == null ? 0 : htmlNames.size());
+        toast(appContext, "开始导入 " + total + " 组书签...");
         WRITER.execute(new Runnable() {
             @Override
             public void run() {
@@ -1540,9 +2117,12 @@ public class Hook implements IXposedHookLoadPackage {
                     error = shortError(t);
                     log("import export groups failed: " + t);
                 }
+                if (error == null && (inserted > 0 || skipped > 0)) {
+                    notifyBookmarksChanged("localExport.import", inserted, skipped);
+                }
                 recordImportResult(groups, inserted, skipped, error);
                 toast(appContext, error == null
-                        ? "已导入 " + inserted + " 个书签到 " + (appContext == null ? "Via" : appContext.getPackageName())
+                        ? "导入完成：新增 " + inserted + "，跳过 " + skipped + "，分组 " + groups
                         : "导入失败：" + error);
             }
         });
@@ -1577,7 +2157,8 @@ public class Hook implements IXposedHookLoadPackage {
                     continue;
                 }
                 String url = item.optString("url", "").trim();
-                if (!isBookmarkableUrl(url) || !seen.add(url)) {
+                String key = tabUrlKey(url);
+                if (!isBookmarkableUrl(url) || key.length() == 0 || !seen.add(key)) {
                     continue;
                 }
                 String title = item.optString("title", "").trim();
@@ -1621,7 +2202,8 @@ public class Hook implements IXposedHookLoadPackage {
                     continue;
                 }
                 String url = unescapeBookmarkHtml(html.substring(urlStart, urlEnd)).trim();
-                if (!isBookmarkableUrl(url) || !seen.add(url)) {
+                String key = tabUrlKey(url);
+                if (!isBookmarkableUrl(url) || key.length() == 0 || !seen.add(key)) {
                     continue;
                 }
                 String title = unescapeBookmarkHtml(html.substring(titleStart + 1, titleEnd)).trim();
@@ -1756,6 +2338,9 @@ public class Hook implements IXposedHookLoadPackage {
                 + " domainGroup=" + settings.domainGroupEnabled
                 + " inserted=" + result.inserted + " skipped=" + result.skipped + " export=" + exportPath
                 + (resultError == null ? "" : " error=" + resultError));
+        if (settings.bookmarkImportEnabled && resultError == null && (result.inserted > 0 || result.skipped > 0)) {
+            notifyBookmarksChanged(source, result.inserted, result.skipped);
+        }
         recordLastSaveResult(batch, source, tabs, result, settings, exportPath, resultError);
 
         if (settings.bookmarkImportEnabled && !settings.tabExportEnabled) {
@@ -1834,24 +2419,50 @@ public class Hook implements IXposedHookLoadPackage {
         } catch (Throwable ignored) {
         }
         List<?> tabs = rawTabs instanceof List ? (List<?>) rawTabs : null;
+        LinkedHashSet<String> seen = new LinkedHashSet<String>();
         for (int i = 0; i < rawList.size(); i++) {
             Object value = rawList.get(i);
             TabRecord record = tabRecordFromValue(value, i);
+            TabRecord liveRecord = null;
             if (record == null && tabs != null && i < tabs.size()) {
-                record = tabRecordFromValue(tabs.get(i), i);
+                liveRecord = tabRecordFromValue(tabs.get(i), i);
+                record = liveRecord;
             } else if (record != null && (record.title == null || record.title.trim().length() == 0)
                     && tabs != null && i < tabs.size()) {
+                liveRecord = tabRecordFromValue(tabs.get(i), i);
+                if (liveRecord != null && isMeaningfulUrl(liveRecord.url)) {
+                    record = mergeTabRecord(record, liveRecord);
+                }
                 String title = titleFromViaTab(tabs.get(i));
                 if (title != null && title.trim().length() > 0) {
                     record = new TabRecord(record.index, title.trim(), record.url);
                 }
+            } else if (record != null && tabs != null && i < tabs.size()) {
+                liveRecord = tabRecordFromValue(tabs.get(i), i);
+                if (liveRecord != null && isMeaningfulUrl(liveRecord.url)) {
+                    record = mergeTabRecord(record, liveRecord);
+                }
             }
-            if (record != null && isMeaningfulUrl(record.url)) {
+            String key = tabUrlKey(record == null ? null : record.url);
+            if (record != null && isMeaningfulUrl(record.url) && key.length() > 0 && seen.add(key)) {
                 records.add(new TabRecord(records.size(), record.title, record.url));
             }
         }
         log("snapshot tab records parsed: raw=" + rawList.size() + " tabs=" + records.size());
         return records;
+    }
+
+    private static TabRecord mergeTabRecord(TabRecord base, TabRecord live) {
+        if (base == null) {
+            return live;
+        }
+        if (live == null || !isMeaningfulUrl(live.url)) {
+            return base;
+        }
+        String title = live.title == null || live.title.trim().length() == 0
+                ? base.title
+                : live.title.trim();
+        return new TabRecord(base.index, title, live.url.trim());
     }
 
     private static List<TabRecord> tabRecordsFromList(List<?> values) {
@@ -1862,7 +2473,8 @@ public class Hook implements IXposedHookLoadPackage {
         LinkedHashSet<String> seen = new LinkedHashSet<String>();
         for (int i = 0; i < values.size(); i++) {
             TabRecord record = tabRecordFromValue(values.get(i), i);
-            if (record == null || !isMeaningfulUrl(record.url) || !seen.add(record.url)) {
+            String key = tabUrlKey(record == null ? null : record.url);
+            if (record == null || !isMeaningfulUrl(record.url) || key.length() == 0 || !seen.add(key)) {
                 continue;
             }
             records.add(new TabRecord(records.size(), record.title, record.url));
@@ -2056,7 +2668,8 @@ public class Hook implements IXposedHookLoadPackage {
                 if (url.length() == 0 || "null".equals(url)) {
                     continue;
                 }
-                if (!seen.add(url)) {
+                String key = tabUrlKey(url);
+                if (key.length() == 0 || !seen.add(key)) {
                     continue;
                 }
                 String title = tab.optString("title", "").trim();
@@ -2161,14 +2774,16 @@ public class Hook implements IXposedHookLoadPackage {
                 for (Map.Entry<String, List<TabRecord>> entry : batch.domainGroups.entrySet()) {
                     String childFolderId = ensureBookmarkFolder(db, entry.getKey(), folderId, folderOrdering++);
                     int ordering = maxOrdering(db, "bookmark_items", "folder_id", childFolderId) + 1;
+                    Set<String> existing = existingBookmarkKeys(db, childFolderId);
                     for (TabRecord tab : entry.getValue()) {
-                        ordering = insertBookmarkIfNeeded(db, childFolderId, tab, ordering, now, result);
+                        ordering = insertBookmarkIfNeeded(db, childFolderId, tab, ordering, now, result, existing);
                     }
                 }
             } else {
                 int ordering = maxOrdering(db, "bookmark_items", "folder_id", folderId) + 1;
+                Set<String> existing = existingBookmarkKeys(db, folderId);
                 for (TabRecord tab : tabs) {
-                    ordering = insertBookmarkIfNeeded(db, folderId, tab, ordering, now, result);
+                    ordering = insertBookmarkIfNeeded(db, folderId, tab, ordering, now, result, existing);
                 }
             }
             db.setTransactionSuccessful();
@@ -2188,12 +2803,14 @@ public class Hook implements IXposedHookLoadPackage {
     }
 
     private static int insertBookmarkIfNeeded(SQLiteDatabase db, String folderId, TabRecord tab,
-                                              int ordering, long now, BookmarkSaveResult result) {
+                                              int ordering, long now, BookmarkSaveResult result,
+                                              Set<String> existing) {
         if (tab == null || !isBookmarkableUrl(tab.url)) {
             result.skipped++;
             return ordering;
         }
-        if (bookmarkExists(db, folderId, tab.url)) {
+        String key = tabUrlKey(tab.url);
+        if (key.length() == 0 || existing.contains(key)) {
             result.skipped++;
             return ordering;
         }
@@ -2207,6 +2824,7 @@ public class Hook implements IXposedHookLoadPackage {
         values.put("last_updated_at", now);
         long row = db.insert("bookmark_items", null, values);
         if (row >= 0) {
+            existing.add(key);
             result.inserted++;
             return ordering + 1;
         }
@@ -2220,6 +2838,10 @@ public class Hook implements IXposedHookLoadPackage {
         }
         String title = tab.title == null ? "" : tab.title.trim();
         if (title.length() == 0 || ("主页".equals(title) && !isHomepageUrl(tab.url))) {
+            String remembered = rememberedTitle(tab.url);
+            if (remembered != null && remembered.trim().length() > 0 && !isMeaningfulUrl(remembered)) {
+                return remembered.trim();
+            }
             return titleFromUrl(tab.url);
         }
         return title;
@@ -2379,6 +3001,26 @@ public class Hook implements IXposedHookLoadPackage {
             }
         }
         return null;
+    }
+
+    private static Set<String> existingBookmarkKeys(SQLiteDatabase db, String folderId) {
+        LinkedHashSet<String> urls = new LinkedHashSet<String>();
+        Cursor cursor = null;
+        try {
+            cursor = db.query("bookmark_items", new String[]{"url"}, "folder_id = ?",
+                    new String[]{folderId}, null, null, null);
+            while (cursor != null && cursor.moveToNext()) {
+                String key = tabUrlKey(cursor.getString(0));
+                if (key.length() > 0) {
+                    urls.add(key);
+                }
+            }
+        } finally {
+            if (cursor != null) {
+                cursor.close();
+            }
+        }
+        return urls;
     }
 
     private static boolean bookmarkExists(SQLiteDatabase db, String folderId, String url) {
@@ -2787,9 +3429,14 @@ public class Hook implements IXposedHookLoadPackage {
         if (appContext == null) {
             return false;
         }
+        if (tabCaptureCleared) {
+            log("skip snapshot write while capture cleared: " + root.optString("source"));
+            return false;
+        }
         File dir = agentDir();
         final File out = new File(dir, isTabManagerSource(root.optString("source")) ? "tabs.json" : "webview-fallback.json");
         final String payload = root.toString(2);
+        final long generation = tabCacheGeneration;
         JSONObject signatureRoot = new JSONObject(root.toString());
         signatureRoot.remove("timestamp");
         final String signature = signatureRoot.toString();
@@ -2804,7 +3451,7 @@ public class Hook implements IXposedHookLoadPackage {
             LAST_PAYLOAD.put(key, signature);
             LAST_WRITE_AT.put(key, now);
         }
-        writeJsonToFile(out, payload);
+        writeJsonToFile(out, payload, generation);
         return true;
     }
 
@@ -2817,15 +3464,23 @@ public class Hook implements IXposedHookLoadPackage {
     }
 
     private static void writeJsonToFile(final File out, final String payload) {
+        writeJsonToFile(out, payload, tabCacheGeneration);
+    }
+
+    private static void writeJsonToFile(final File out, final String payload, final long generation) {
         WRITER.execute(new Runnable() {
             @Override
             public void run() {
-                writeJsonToFileNow(out, payload);
+                writeJsonToFileNow(out, payload, generation);
             }
         });
     }
 
-    private static void writeJsonToFileNow(File out, String payload) {
+    private static void writeJsonToFileNow(File out, String payload, long generation) {
+        if (generation != tabCacheGeneration || tabCaptureCleared) {
+            log("skip stale snapshot write: " + (out == null ? "null" : out.getName()));
+            return;
+        }
         FileOutputStream stream = null;
         try {
             byte[] data = payload.getBytes(StandardCharsets.UTF_8);

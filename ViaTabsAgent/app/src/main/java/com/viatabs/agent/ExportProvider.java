@@ -21,6 +21,7 @@ public class ExportProvider extends ContentProvider {
     static final String METHOD_SET_BOOKMARK_IMPORT_ENABLED = "setBookmarkImportEnabled";
     static final String METHOD_SET_DOMAIN_GROUP_ENABLED = "setDomainGroupEnabled";
     static final String METHOD_SET_PANEL_COLOR = "setPanelColor";
+    static final String METHOD_SET_PANEL_STYLE = "setPanelStyle";
     static final String EXTRA_FILE_NAME = "fileName";
     static final String EXTRA_PAYLOAD = "payload";
     static final String EXTRA_MESSAGE = "message";
@@ -105,6 +106,22 @@ public class ExportProvider extends ContentProvider {
                 AgentStore.setPanelColor(getContext(), color);
                 AgentStore.appendLog(getContext(), "悬浮按钮配色: " + color);
                 result.putString(EXTRA_PANEL_COLOR, AgentStore.getPanelColor(getContext()));
+            } else if (METHOD_SET_PANEL_STYLE.equals(method)) {
+                String color = extras == null ? AgentStore.PANEL_COLOR_BLUE
+                        : extras.getString(EXTRA_PANEL_COLOR, AgentStore.PANEL_COLOR_BLUE);
+                int alpha = extras == null ? AgentStore.getPanelAlpha(getContext())
+                        : extras.getInt(EXTRA_PANEL_ALPHA, AgentStore.getPanelAlpha(getContext()));
+                int size = extras == null ? AgentStore.getPanelSize(getContext())
+                        : extras.getInt(EXTRA_PANEL_SIZE, AgentStore.getPanelSize(getContext()));
+                AgentStore.setPanelColor(getContext(), color);
+                AgentStore.setPanelAlpha(getContext(), alpha);
+                AgentStore.setPanelSize(getContext(), size);
+                AgentStore.appendLog(getContext(), "panel style: color=" + color
+                        + " size=" + AgentStore.getPanelSize(getContext())
+                        + " alpha=" + AgentStore.getPanelAlpha(getContext()));
+                result.putString(EXTRA_PANEL_COLOR, AgentStore.getPanelColor(getContext()));
+                result.putInt(EXTRA_PANEL_ALPHA, AgentStore.getPanelAlpha(getContext()));
+                result.putInt(EXTRA_PANEL_SIZE, AgentStore.getPanelSize(getContext()));
             }
         } catch (Throwable t) {
             AgentStore.appendLog(getContext(), method + " 失败: " + t);

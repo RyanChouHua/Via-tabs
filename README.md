@@ -25,6 +25,8 @@ ViaTabsAgent 是一个面向 Via 浏览器的 LSPosed/Xposed 模块，用于在 
 - Via 启动恢复但尚未手动点开的标签，当前不能保证完整读取。
 - “渐进打开恢复标签”路线已暂停，避免大量标签自动加载带来的崩溃和流量风险。
 - 书签导入依赖 Via 当前版本内部数据库结构，Via 升级后可能需要重新适配。
+- 0.4.9 中书签导入后的 Via 书签页刷新仍不稳定，可能需要重启 Via 才能显示。
+- 0.4.9 中“清空已加载可保存标签”功能仍未可靠生效。
 
 ## 项目结构
 
@@ -69,7 +71,7 @@ ViaTabsAgent/app/build/outputs/apk/debug/app-debug.apk
 仓库内保留当前调试构建产物：
 
 ```text
-release/ViaTabsAgent-LSPosed-0.4.5-lsposed-ui-debug.apk
+release/ViaTabsAgent-LSPosed-0.4.9-lsposed-ui-debug.apk
 ```
 
 ## 使用

@@ -130,6 +130,23 @@ Le/h/a/g/a.getUrl()
 adb pull /storage/emulated/0/Android/data/mark.via.gp/files/ViaTabsAgent/tabs.json
 ```
 
+## 手机端操作验收
+
+LSPosed 2.0.2 以上版本推荐验收：
+
+1. 安装 ViaTabsAgent 模块 APK。
+2. 在 LSPosed 中启用模块。
+3. 作用域勾选 `mark.via` 和/或 `mark.via.gp`。
+4. 强制停止 Via 并重新打开。
+5. 在 Via 页面右侧看到 `Tabs` 悬浮按钮。
+6. 点击 `Tabs`，确认可以打开操作面板。
+7. 使用面板执行 `Save tabs to bookmarks`，确认 Via 书签中出现对应文件夹。
+8. 使用面板执行 `Create tab group`，确认 `tab-groups.json` 追加分组。
+9. 使用面板执行 `Restore latest group`，确认可恢复最近未归档分组。
+10. 使用面板执行 `Archive latest group` 和 `Delete latest group`，确认日志无异常。
+
+ADB 广播只保留为开发验证和自动化测试入口，不作为最终手机端交互方式。
+
 ## 生产风险
 
 - LSPatch 官方仓库已归档，长期维护需要评估 fork 或替代框架。

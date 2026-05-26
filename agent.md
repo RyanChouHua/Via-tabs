@@ -445,6 +445,25 @@ ViaTabsAgent/app/src/main/java/com/viatabs/agent/Hook.java
 7. 一键保存当前已打开标签页到 Via 原生书签文件夹。
 8. 保存标签页分组快照，并可同步创建同名 Via 书签文件夹。
 9. 支持参考 OneTab/Chrome/Edge 后的移动端分组管理：稳定 `groupId`、组名、颜色、归档状态、删除和整组恢复。
+10. 在 Via 浏览器内注入轻量操作面板，手机端可直接点击完成保存、分组、恢复、归档和删除；ADB 广播仅作为开发调试入口。
+
+### 手机端操作方式
+
+推荐生产使用 LSPosed 2.0.2 以上版本：
+
+1. 在 LSPosed 中启用 ViaTabsAgent 模块。
+2. 作用域选择 `mark.via` 和/或 `mark.via.gp`。
+3. 强制停止并重新打开 Via。
+4. 进入 Via 后，页面右侧会出现 `Tabs` 悬浮按钮。
+5. 点击 `Tabs`，在面板中选择：
+   - `Save tabs to bookmarks`
+   - `Create tab group`
+   - `Restore latest group`
+   - `Archive latest group`
+   - `Delete latest group`
+   - `Refresh tabs snapshot`
+
+当前面板是最小可用版本，优先保证不破坏 Via 原有界面。后续可以继续迭代为底部操作栏、Via 菜单项或独立模块 Activity。
 
 调试广播：
 

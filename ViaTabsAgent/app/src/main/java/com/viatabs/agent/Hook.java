@@ -1,9 +1,12 @@
 package com.viatabs.agent;
 
 import android.app.Application;
+import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ContentValues;
 import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.database.Cursor;
@@ -15,6 +18,15 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.Parcelable;
 import android.util.Log;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.CheckBox;
+import android.widget.EditText;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import android.widget.Toast;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -30,6 +42,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.WeakHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -49,6 +62,7 @@ public class Hook implements IXposedHookLoadPackage {
     private static volatile Object lastTabManager;
     private static volatile Handler mainHandler;
     private static volatile boolean restoringAgentSession;
+    private static final WeakHashMap<Activity, View> PANEL_BUTTONS = new WeakHashMap<Activity, View>();
     private static final ExecutorService WRITER = Executors.newSingleThreadExecutor();
     private static final ThreadLocal<Boolean> IN_MANAGER_SNAPSHOT = new ThreadLocal<Boolean>();
     private static final Map<String, String> LAST_PAYLOAD = new HashMap<String, String>();
@@ -86,9 +100,26 @@ public class Hook implements IXposedHookLoadPackage {
                 captureTabManagerConstructors(classLoader);
                 installVia700Hooks(classLoader);
                 installWebViewFallback(classLoader);
+                installViaPanelHook();
                 registerDebugReceiver();
             }
         });
+    }
+
+    private static void installViaPanelHook() {
+        try {
+            XposedHelpers.findAndHookMethod(Activity.class, "onResume", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (param.thisObject instanceof Activity) {
+                        maybeInstallPanelButton((Activity) param.thisObject);
+                    }
+                }
+            });
+            log("hooked Activity.onResume for panel");
+        } catch (Throwable t) {
+            log("failed to hook Activity.onResume for panel: " + t);
+        }
     }
 
     private static void captureTabManagerConstructors(ClassLoader classLoader) {
@@ -242,6 +273,225 @@ public class Hook implements IXposedHookLoadPackage {
                 } catch (Throwable t) {
                     log("switch tab failed: " + t);
                 }
+            }
+        });
+    }
+
+    private static void maybeInstallPanelButton(final Activity activity) {
+        if (activity == null || activity.isFinishing() || PANEL_BUTTONS.containsKey(activity)) {
+            return;
+        }
+        String packageName = activity.getPackageName();
+        if (!VIA_CN.equals(packageName) && !VIA_GP.equals(packageName)) {
+            return;
+        }
+        ViewGroup content = activity.findViewById(android.R.id.content);
+        if (content == null) {
+            return;
+        }
+        final TextView button = new TextView(activity);
+        button.setText("Tabs");
+        button.setTextColor(0xffffffff);
+        button.setTextSize(12f);
+        button.setGravity(Gravity.CENTER);
+        button.setBackgroundColor(0xcc1f6feb);
+        button.setPadding(dp(activity, 10), dp(activity, 8), dp(activity, 10), dp(activity, 8));
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(dp(activity, 58), dp(activity, 42));
+        params.gravity = Gravity.RIGHT | Gravity.CENTER_VERTICAL;
+        params.rightMargin = dp(activity, 8);
+        try {
+            content.addView(button, params);
+            PANEL_BUTTONS.put(activity, button);
+            button.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    showOperationPanel(activity);
+                }
+            });
+            log("installed operation panel button");
+        } catch (Throwable t) {
+            log("install panel button failed: " + t);
+        }
+    }
+
+    private static void showOperationPanel(final Activity activity) {
+        final String[] actions = new String[]{
+                "Save tabs to bookmarks",
+                "Create tab group",
+                "Restore latest group",
+                "Archive latest group",
+                "Delete latest group",
+                "Refresh tabs snapshot"
+        };
+        new AlertDialog.Builder(activity)
+                .setTitle("Via Tabs")
+                .setItems(actions, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        if (which == 0) {
+                            promptSaveBookmarks(activity);
+                        } else if (which == 1) {
+                            promptCreateGroup(activity);
+                        } else if (which == 2) {
+                            restoreLatestGroupFromPanel(activity);
+                        } else if (which == 3) {
+                            archiveLatestGroupFromPanel(activity);
+                        } else if (which == 4) {
+                            deleteLatestGroupFromPanel(activity);
+                        } else if (which == 5) {
+                            snapshotFromLastTabManager("panel.dump");
+                            toast(activity, "Snapshot refreshed");
+                        }
+                    }
+                })
+                .show();
+    }
+
+    private static void promptSaveBookmarks(final Activity activity) {
+        final EditText input = new EditText(activity);
+        input.setSingleLine(true);
+        input.setText(defaultGroupName());
+        input.setHint("Bookmark folder");
+        new AlertDialog.Builder(activity)
+                .setTitle("Save current tabs")
+                .setView(input)
+                .setPositiveButton("Save", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        saveCurrentTabsToBookmarks(textOrDefault(input, "ViaTabsAgent"));
+                        toast(activity, "Saving tabs to bookmarks");
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private static void promptCreateGroup(final Activity activity) {
+        final LinearLayout layout = new LinearLayout(activity);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(activity, 16);
+        layout.setPadding(pad, pad / 2, pad, 0);
+
+        final EditText name = new EditText(activity);
+        name.setSingleLine(true);
+        name.setText(defaultGroupName());
+        name.setHint("Group name");
+        layout.addView(name, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        final EditText color = new EditText(activity);
+        color.setSingleLine(true);
+        color.setText("green");
+        color.setHint("Color: blue, green, purple...");
+        layout.addView(color, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        final CheckBox bookmarks = new CheckBox(activity);
+        bookmarks.setText("Also save to Via bookmarks");
+        bookmarks.setChecked(true);
+        layout.addView(bookmarks, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        final CheckBox archived = new CheckBox(activity);
+        archived.setText("Archive this group");
+        archived.setChecked(false);
+        layout.addView(archived, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        new AlertDialog.Builder(activity)
+                .setTitle("Create tab group")
+                .setView(layout)
+                .setPositiveButton("Create", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        groupCurrentTabs(null, textOrDefault(name, defaultGroupName()),
+                                textOrDefault(color, "blue"), bookmarks.isChecked(), archived.isChecked(), false);
+                        toast(activity, "Creating group");
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private static void restoreLatestGroupFromPanel(Activity activity) {
+        try {
+            JSONObject latest = latestTabGroup(false);
+            if (latest == null) {
+                toast(activity, "No group found");
+                return;
+            }
+            restoreTabGroup(latest.optString("groupId"), null, true, -1, null);
+            toast(activity, "Restoring " + latest.optString("group", "group"));
+        } catch (Throwable t) {
+            log("panel restore latest failed: " + t);
+            toast(activity, "Restore failed");
+        }
+    }
+
+    private static void archiveLatestGroupFromPanel(Activity activity) {
+        try {
+            JSONObject latest = latestTabGroup(false);
+            if (latest == null) {
+                toast(activity, "No group found");
+                return;
+            }
+            updateTabGroupArchive(latest.optString("groupId"), null, true);
+            toast(activity, "Archived " + latest.optString("group", "group"));
+        } catch (Throwable t) {
+            log("panel archive latest failed: " + t);
+            toast(activity, "Archive failed");
+        }
+    }
+
+    private static void deleteLatestGroupFromPanel(Activity activity) {
+        try {
+            JSONObject latest = latestTabGroup(true);
+            if (latest == null) {
+                toast(activity, "No group found");
+                return;
+            }
+            deleteTabGroup(latest.optString("groupId"), null);
+            toast(activity, "Deleted " + latest.optString("group", "group"));
+        } catch (Throwable t) {
+            log("panel delete latest failed: " + t);
+            toast(activity, "Delete failed");
+        }
+    }
+
+    private static JSONObject latestTabGroup(boolean includeArchived) throws Exception {
+        JSONArray groups = readTabGroups(new File(agentDir(), "tab-groups.json"));
+        for (int i = groups.length() - 1; i >= 0; i--) {
+            JSONObject group = groups.optJSONObject(i);
+            if (group == null) {
+                continue;
+            }
+            if (includeArchived || !group.optBoolean("archived", false)) {
+                return group;
+            }
+        }
+        return null;
+    }
+
+    private static String defaultGroupName() {
+        return "Via Tabs " + (System.currentTimeMillis() / 1000L);
+    }
+
+    private static String textOrDefault(EditText input, String fallback) {
+        if (input == null || input.getText() == null) {
+            return fallback;
+        }
+        String value = input.getText().toString().trim();
+        return value.length() == 0 ? fallback : value;
+    }
+
+    private static int dp(Context context, int value) {
+        return (int) (value * context.getResources().getDisplayMetrics().density + 0.5f);
+    }
+
+    private static void toast(final Context context, final String message) {
+        if (context == null || mainHandler == null) {
+            return;
+        }
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                Toast.makeText(context, message, Toast.LENGTH_SHORT).show();
             }
         });
     }

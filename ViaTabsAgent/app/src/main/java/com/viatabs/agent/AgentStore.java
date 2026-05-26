@@ -32,6 +32,7 @@ final class AgentStore {
     static final String KEY_TAB_EXPORT_ENABLED = "tab_export_enabled";
     static final String KEY_BOOKMARK_IMPORT_ENABLED = "bookmark_import_enabled";
     static final String KEY_DOMAIN_GROUP_ENABLED = "domain_group_enabled";
+    static final String KEY_LAST_SAVE_RESULT = "last_save_result";
 
     private static final int MAX_LOG_BYTES = 64 * 1024;
 
@@ -124,6 +125,24 @@ final class AgentStore {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit()
                 .putBoolean(KEY_DOMAIN_GROUP_ENABLED, enabled)
+                .apply();
+    }
+
+    static String getLastSaveResult(Context context) {
+        if (context == null) {
+            return "";
+        }
+        SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        return prefs.getString(KEY_LAST_SAVE_RESULT, "");
+    }
+
+    static void setLastSaveResult(Context context, String result) {
+        if (context == null) {
+            return;
+        }
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_LAST_SAVE_RESULT, result == null ? "" : result)
                 .apply();
     }
 

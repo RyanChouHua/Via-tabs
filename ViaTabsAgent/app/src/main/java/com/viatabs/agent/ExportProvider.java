@@ -11,6 +11,8 @@ public class ExportProvider extends ContentProvider {
     static final String METHOD_APPEND_LOG = "appendLog";
     static final String METHOD_READ_LOG = "readLog";
     static final String METHOD_CLEAR_LOG = "clearLog";
+    static final String METHOD_GET_LAST_RESULT = "getLastResult";
+    static final String METHOD_SET_LAST_RESULT = "setLastResult";
     static final String METHOD_GET_EXPORT_ENABLED = "getExportEnabled";
     static final String METHOD_SET_EXPORT_ENABLED = "setExportEnabled";
     static final String METHOD_GET_SETTINGS = "getSettings";
@@ -22,6 +24,7 @@ public class ExportProvider extends ContentProvider {
     static final String EXTRA_MESSAGE = "message";
     static final String EXTRA_PATH = "path";
     static final String EXTRA_LOG = "log";
+    static final String EXTRA_RESULT = "result";
     static final String EXTRA_ENABLED = "enabled";
     static final String EXTRA_PANEL_ENABLED = "panelEnabled";
     static final String EXTRA_TAB_EXPORT_ENABLED = "tabExportEnabled";
@@ -53,6 +56,11 @@ public class ExportProvider extends ContentProvider {
                 result.putString(EXTRA_LOG, AgentStore.readLog(getContext()));
             } else if (METHOD_CLEAR_LOG.equals(method)) {
                 AgentStore.clearLog(getContext());
+            } else if (METHOD_GET_LAST_RESULT.equals(method)) {
+                result.putString(EXTRA_RESULT, AgentStore.getLastSaveResult(getContext()));
+            } else if (METHOD_SET_LAST_RESULT.equals(method)) {
+                String saveResult = extras == null ? "" : extras.getString(EXTRA_RESULT, "");
+                AgentStore.setLastSaveResult(getContext(), saveResult);
             } else if (METHOD_GET_EXPORT_ENABLED.equals(method)) {
                 result.putBoolean(EXTRA_ENABLED, AgentStore.isExportEnabled(getContext()));
             } else if (METHOD_SET_EXPORT_ENABLED.equals(method)) {

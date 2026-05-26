@@ -2,10 +2,12 @@ package com.viatabs.agent;
 
 import android.app.Application;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ComponentName;
 import android.content.ContentValues;
 import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.database.Cursor;
@@ -80,8 +82,10 @@ public class Hook implements IXposedHookLoadPackage {
     private static final ThreadLocal<Boolean> IN_WEBVIEW_CAPTURE = new ThreadLocal<Boolean>();
     private static final Map<String, String> LAST_PAYLOAD = new HashMap<String, String>();
     private static final Map<String, Long> LAST_WRITE_AT = new HashMap<String, Long>();
+    private static final Map<String, Long> LAST_FILE_LOG_AT = new HashMap<String, Long>();
     private static final Map<String, String> WEBVIEW_TITLES = new HashMap<String, String>();
     private static final long MIN_WRITE_INTERVAL_MS = 1000L;
+    private static final long SNAPSHOT_LOG_INTERVAL_MS = 10000L;
     private static final String ACTION_OPEN_TEST_TABS = "com.viatabs.agent.OPEN_TEST_TABS";
     private static final String ACTION_DUMP_TABS = "com.viatabs.agent.DUMP_TABS";
     private static final String ACTION_SWITCH_TAB = "com.viatabs.agent.SWITCH_TAB";
@@ -339,8 +343,7 @@ public class Hook implements IXposedHookLoadPackage {
                         return;
                     }
                     log("panel export clicked");
-                    saveCurrentTabsToBookmarks("\u4e66\u7b7e", activity);
-                    toast(activity, "\u6b63\u5728\u5bfc\u51fa\u4e66\u7b7e");
+                    previewCurrentTabsToBookmarks(button, activity);
                 }
             });
             log("installed bookmark export button");
@@ -1036,6 +1039,165 @@ public class Hook implements IXposedHookLoadPackage {
         saveCurrentTabsToBookmarks(folderName, null);
     }
 
+    private static void previewCurrentTabsToBookmarks(final TextView button, final Activity activity) {
+        setPanelButtonState(button, "读取中", false);
+        final ExportSettings settings = readExportSettings();
+        if (!settings.tabExportEnabled && !settings.bookmarkImportEnabled) {
+            log("panel preview skipped: tabExport=false bookmarkImport=false");
+            toast(activity, "请先在模块中开启标签导出或标签导入到书签");
+            resetPanelButtonLater(button, 0L);
+            return;
+        }
+        final Object manager = lastTabManager;
+        final Handler handler = mainHandler;
+        final List<TabRecord> visibleWebViews = collectWebViewTabRecords(activity);
+        if (visibleWebViews.size() > 0) {
+            writeTabRecordsSnapshot("webView.activity.preview", visibleWebViews);
+        }
+        if (manager == null || handler == null) {
+            if (visibleWebViews.size() > 0) {
+                showSavePreviewDialog(button, activity, visibleWebViews, "webview.activity", settings);
+                return;
+            }
+            loadCachedPreview(button, activity, "managerNotReady", settings);
+            return;
+        }
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    List<TabRecord> tabs = snapshotTabRecords(manager);
+                    if (tabs.size() == 0) {
+                        loadCachedPreview(button, activity, "emptyLiveSnapshot", settings);
+                        return;
+                    }
+                    showSavePreviewDialog(button, activity, tabs, "live", settings);
+                } catch (Throwable t) {
+                    log("preview live snapshot failed, using cache: " + t);
+                    loadCachedPreview(button, activity, "liveSnapshotFailed", settings);
+                }
+            }
+        });
+    }
+
+    private static void loadCachedPreview(final TextView button, final Activity activity,
+                                          final String reason, final ExportSettings settings) {
+        WRITER.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    final List<TabRecord> tabs = readFallbackTabRecords();
+                    if (tabs.size() == 0) {
+                        log("panel preview cache empty: reason=" + reason);
+                        toast(activity, "标签管理器未就绪，且没有读取到缓存标签");
+                        resetPanelButtonLater(button, 0L);
+                        return;
+                    }
+                    log("panel preview cache snapshot: reason=" + reason + " tabs=" + tabs.size());
+                    Handler handler = mainHandler;
+                    if (handler != null) {
+                        handler.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                showSavePreviewDialog(button, activity, tabs, "cache." + reason, settings);
+                            }
+                        });
+                    }
+                } catch (Throwable t) {
+                    log("panel preview cache failed: " + t);
+                    toast(activity, "读取标签失败：" + shortError(t));
+                    setPanelButtonState(button, "失败", false);
+                    resetPanelButtonLater(button, 2000L);
+                }
+            }
+        });
+    }
+
+    private static void showSavePreviewDialog(final TextView button, final Activity activity,
+                                              final List<TabRecord> tabs, final String source,
+                                              final ExportSettings settings) {
+        if (activity == null || activity.isFinishing()) {
+            resetPanelButtonLater(button, 0L);
+            return;
+        }
+        final BookmarkBatch batch = createBookmarkBatch(tabs, settings.domainGroupEnabled);
+        log("panel preview ready: source=" + source + " captured=" + tabs.size()
+                + " bookmarkable=" + batch.bookmarkCount + " folder=" + batch.folderName);
+        String message = "当前捕获标签: " + tabs.size()
+                + "\n可保存标签: " + batch.bookmarkCount
+                + "\n文件夹: " + batch.folderName
+                + "\n标签导出: " + enabledText(settings.tabExportEnabled)
+                + "\n导入书签: " + enabledText(settings.bookmarkImportEnabled)
+                + "\n按域名整理: " + enabledText(settings.domainGroupEnabled)
+                + "\n导出目录: Download/ViaTabsAgent";
+        setPanelButtonState(button, "确认", false);
+        try {
+            new AlertDialog.Builder(activity)
+                    .setTitle("保存当前标签页？")
+                    .setMessage(message)
+                    .setPositiveButton("确认保存", new DialogInterface.OnClickListener() {
+                        @Override
+                        public void onClick(DialogInterface dialog, int which) {
+                            log("panel preview confirmed: folder=" + batch.folderName
+                                    + " bookmarkable=" + batch.bookmarkCount);
+                            setPanelButtonState(button, "保存中", false);
+                            saveAndExportTabs(batch, tabs, activity, source, button);
+                        }
+                    })
+                    .setNegativeButton("取消", new DialogInterface.OnClickListener() {
+                        @Override
+                        public void onClick(DialogInterface dialog, int which) {
+                            log("panel preview canceled");
+                            resetPanelButtonLater(button, 0L);
+                        }
+                    })
+                    .setOnCancelListener(new DialogInterface.OnCancelListener() {
+                        @Override
+                        public void onCancel(DialogInterface dialog) {
+                            log("panel preview canceled");
+                            resetPanelButtonLater(button, 0L);
+                        }
+                    })
+                    .show();
+        } catch (Throwable t) {
+            log("show save preview dialog failed: " + t);
+            toast(activity, "显示确认窗口失败：" + shortError(t));
+            resetPanelButtonLater(button, 0L);
+        }
+    }
+
+    private static String enabledText(boolean enabled) {
+        return enabled ? "开启" : "关闭";
+    }
+
+    private static void setPanelButtonState(final TextView button, final String text, final boolean enabled) {
+        Handler handler = mainHandler;
+        if (button == null || handler == null) {
+            return;
+        }
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                button.setText(text);
+                button.setEnabled(enabled);
+            }
+        });
+    }
+
+    private static void resetPanelButtonLater(final TextView button, long delayMs) {
+        Handler handler = mainHandler;
+        if (button == null || handler == null) {
+            return;
+        }
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                button.setText("\u4e66\u7b7e");
+                button.setEnabled(true);
+            }
+        }, delayMs);
+    }
+
     private static void saveCurrentTabsToBookmarks(final String folderName, final Context uiContext) {
         log("saveCurrentTabsToBookmarks requested: folder=" + folderName);
         final Object manager = lastTabManager;
@@ -1107,6 +1269,17 @@ public class Hook implements IXposedHookLoadPackage {
         });
     }
 
+    private static void saveAndExportTabs(final BookmarkBatch batch, final List<TabRecord> tabs,
+                                          final Context uiContext, final String source,
+                                          final TextView button) {
+        WRITER.execute(new Runnable() {
+            @Override
+            public void run() {
+                saveAndExportTabsNow(batch, tabs, uiContext, source, button);
+            }
+        });
+    }
+
     private static void saveAndExportTabsNow(String folderName, List<TabRecord> tabs,
                                              Context uiContext, String source) {
         ExportSettings settings = readExportSettings();
@@ -1116,6 +1289,21 @@ public class Hook implements IXposedHookLoadPackage {
             return;
         }
         BookmarkBatch batch = createBookmarkBatch(tabs, settings.domainGroupEnabled);
+        saveAndExportTabsNow(batch, tabs, uiContext, source, null);
+    }
+
+    private static void saveAndExportTabsNow(BookmarkBatch batch, List<TabRecord> tabs,
+                                             Context uiContext, String source, TextView button) {
+        ExportSettings settings = readExportSettings();
+        if (!settings.tabExportEnabled && !settings.bookmarkImportEnabled) {
+            log("saved tabs skipped: tabExport=false bookmarkImport=false");
+            toast(uiContext, "请先在模块中开启标签导出或标签导入到书签");
+            recordLastSaveResult(batch, source, tabs, new BookmarkSaveResult(), settings, null,
+                    "tabExport=false bookmarkImport=false");
+            setPanelButtonState(button, "失败", false);
+            resetPanelButtonLater(button, 2000L);
+            return;
+        }
 
         BookmarkSaveResult result = new BookmarkSaveResult();
         if (settings.bookmarkImportEnabled) {
@@ -1130,30 +1318,78 @@ public class Hook implements IXposedHookLoadPackage {
         String exportPath = settings.tabExportEnabled
                 ? writeBookmarkSaveSnapshot(batch, tabs, result, source)
                 : null;
+        result.jsonExportPath = exportPath;
+        String resultError = result.error;
+        if (settings.tabExportEnabled && (exportPath == null || exportPath.length() == 0)) {
+            resultError = resultError == null ? "export failed" : resultError + "; export failed";
+        }
 
         log("saved tabs export: source=" + source + " folder=" + batch.folderName + " tabs=" + tabs.size()
                 + " tabExport=" + settings.tabExportEnabled
                 + " bookmarkImport=" + settings.bookmarkImportEnabled
                 + " domainGroup=" + settings.domainGroupEnabled
                 + " inserted=" + result.inserted + " skipped=" + result.skipped + " export=" + exportPath
-                + (result.error == null ? "" : " bookmarkError=" + result.error));
+                + (resultError == null ? "" : " error=" + resultError));
+        recordLastSaveResult(batch, source, tabs, result, settings, exportPath, resultError);
 
         if (settings.bookmarkImportEnabled && !settings.tabExportEnabled) {
             toast(uiContext, "已导入 " + result.inserted + " 个书签到 Via");
+            setPanelButtonState(button, resultError == null ? "完成" : "失败", false);
         } else if (!settings.bookmarkImportEnabled && settings.tabExportEnabled) {
             if (exportPath == null || exportPath.length() == 0) {
                 toast(uiContext, "导出失败：未写入 Download/ViaTabsAgent");
+                setPanelButtonState(button, "失败", false);
             } else if (source != null && source.startsWith("cache.")) {
                 toast(uiContext, "已从缓存导出 " + tabs.size() + " 个标签到 Download/ViaTabsAgent");
+                setPanelButtonState(button, "完成", false);
             } else {
                 toast(uiContext, "已导出 " + tabs.size() + " 个标签到 Download/ViaTabsAgent");
+                setPanelButtonState(button, "完成", false);
             }
         } else if (exportPath == null || exportPath.length() == 0) {
             toast(uiContext, "导出失败：未写入 Download/ViaTabsAgent");
+            setPanelButtonState(button, "失败", false);
         } else if (source != null && source.startsWith("cache.")) {
             toast(uiContext, "已导入 " + result.inserted + " 个书签，并从缓存导出到 Download/ViaTabsAgent");
+            setPanelButtonState(button, resultError == null ? "完成" : "失败", false);
         } else {
             toast(uiContext, "已导入 " + result.inserted + " 个书签，已导出 " + tabs.size() + " 个标签");
+            setPanelButtonState(button, resultError == null ? "完成" : "失败", false);
+        }
+        resetPanelButtonLater(button, 2000L);
+    }
+
+    private static void recordLastSaveResult(BookmarkBatch batch, String source, List<TabRecord> tabs,
+                                             BookmarkSaveResult result, ExportSettings settings,
+                                             String exportPath, String error) {
+        if (appContext == null || batch == null || result == null || settings == null) {
+            return;
+        }
+        try {
+            JSONObject root = new JSONObject();
+            root.put("time", new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date()));
+            root.put("timestamp", System.currentTimeMillis());
+            root.put("source", source == null ? JSONObject.NULL : source);
+            root.put("folder", batch.folderName);
+            root.put("captured", tabs == null ? 0 : tabs.size());
+            root.put("bookmarkable", batch.bookmarkCount);
+            root.put("inserted", result.inserted);
+            root.put("skipped", result.skipped);
+            root.put("domainGroup", settings.domainGroupEnabled);
+            root.put("tabExport", settings.tabExportEnabled);
+            root.put("bookmarkImport", settings.bookmarkImportEnabled);
+            root.put("htmlExportPath", result.htmlExportPath == null ? JSONObject.NULL : result.htmlExportPath);
+            root.put("jsonExportPath", exportPath == null ? JSONObject.NULL : exportPath);
+            root.put("error", error == null ? JSONObject.NULL : error);
+            Bundle extras = new Bundle();
+            extras.putString(ExportProvider.EXTRA_RESULT, root.toString());
+            appContext.getContentResolver().call(
+                    AgentStore.EXPORT_URI,
+                    ExportProvider.METHOD_SET_LAST_RESULT,
+                    null,
+                    extras);
+        } catch (Throwable t) {
+            log("record last save result failed: " + t);
         }
     }
 
@@ -1451,7 +1687,8 @@ public class Hook implements IXposedHookLoadPackage {
         String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date(now));
         String folderName = "书签-" + stamp + "-" + bookmarkCount;
         String fileBaseName = "via-" + stamp + "-" + bookmarkCount;
-        return new BookmarkBatch(folderName, fileBaseName, now / 1000L, groupByDomain, groupTabsByDomain(tabs));
+        return new BookmarkBatch(folderName, fileBaseName, now / 1000L, bookmarkCount,
+                groupByDomain, groupTabsByDomain(tabs));
     }
 
     private static LinkedHashMap<String, List<TabRecord>> groupTabsByDomain(List<TabRecord> tabs) {
@@ -1537,7 +1774,7 @@ public class Hook implements IXposedHookLoadPackage {
         ContentValues values = new ContentValues();
         values.put("_id", UUID.randomUUID().toString());
         values.put("url", tab.url);
-        values.put("title", tab.title);
+        values.put("title", displayTitleForBookmark(tab));
         values.put("folder_id", folderId);
         values.put("ordering", ordering);
         values.put("created_at", now);
@@ -1549,6 +1786,25 @@ public class Hook implements IXposedHookLoadPackage {
         }
         result.skipped++;
         return ordering;
+    }
+
+    private static String displayTitleForBookmark(TabRecord tab) {
+        if (tab == null) {
+            return "";
+        }
+        String title = tab.title == null ? "" : tab.title.trim();
+        if (title.length() == 0 || ("主页".equals(title) && !isHomepageUrl(tab.url))) {
+            return titleFromUrl(tab.url);
+        }
+        return title;
+    }
+
+    private static boolean isHomepageUrl(String url) {
+        if (url == null) {
+            return false;
+        }
+        String normalized = url.trim().toLowerCase(Locale.US);
+        return normalized.startsWith("file://") && normalized.contains("homepage");
     }
 
     private static boolean isBookmarkableUrl(String url) {
@@ -1565,10 +1821,10 @@ public class Hook implements IXposedHookLoadPackage {
             if (host == null || host.trim().length() == 0) {
                 return "other";
             }
-            String[] parts = host.toLowerCase(Locale.US).split("\\.");
-            for (int i = parts.length - 1; i >= 0; i--) {
+            String[] parts = normalizeHostParts(host);
+            for (int i = effectiveDomainEnd(parts); i >= 0; i--) {
                 String part = parts[i] == null ? "" : parts[i].trim();
-                if (part.length() == 0 || "www".equals(part) || isPublicSuffixLabel(part)) {
+                if (part.length() == 0 || isHostPrefixLabel(part) || isPublicSuffixLabel(part)) {
                     continue;
                 }
                 return part;
@@ -1576,6 +1832,57 @@ public class Hook implements IXposedHookLoadPackage {
         } catch (Throwable ignored) {
         }
         return "other";
+    }
+
+    private static String[] normalizeHostParts(String host) {
+        if (host == null) {
+            return new String[0];
+        }
+        String normalized = host.toLowerCase(Locale.US).trim();
+        while (normalized.startsWith(".")) {
+            normalized = normalized.substring(1);
+        }
+        while (normalized.endsWith(".")) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        return normalized.split("\\.");
+    }
+
+    private static int effectiveDomainEnd(String[] parts) {
+        if (parts == null || parts.length == 0) {
+            return -1;
+        }
+        int end = parts.length - 1;
+        if (end >= 1 && isTwoPartPublicSuffix(parts[end - 1], parts[end])) {
+            return end - 2;
+        }
+        while (end >= 0 && isPublicSuffixLabel(parts[end])) {
+            end--;
+        }
+        return end;
+    }
+
+    private static boolean isHostPrefixLabel(String label) {
+        return "www".equals(label)
+                || "m".equals(label)
+                || "mobile".equals(label)
+                || "wap".equals(label)
+                || "touch".equals(label);
+    }
+
+    private static boolean isTwoPartPublicSuffix(String left, String right) {
+        String suffix = left + "." + right;
+        return "com.cn".equals(suffix)
+                || "net.cn".equals(suffix)
+                || "org.cn".equals(suffix)
+                || "gov.cn".equals(suffix)
+                || "com.hk".equals(suffix)
+                || "com.tw".equals(suffix)
+                || "co.uk".equals(suffix)
+                || "org.uk".equals(suffix)
+                || "ac.uk".equals(suffix)
+                || "co.jp".equals(suffix)
+                || "com.au".equals(suffix);
     }
 
     private static boolean isPublicSuffixLabel(String label) {
@@ -1685,16 +1992,20 @@ public class Hook implements IXposedHookLoadPackage {
             root.put("folder", batch.folderName);
             root.put("folderId", result.folderId == null ? JSONObject.NULL : result.folderId);
             root.put("domainGroup", batch.groupByDomain);
+            root.put("captured", tabs == null ? 0 : tabs.size());
+            root.put("bookmarkable", batch.bookmarkCount);
             root.put("inserted", result.inserted);
             root.put("skipped", result.skipped);
             root.put("bookmarkError", result.error == null ? JSONObject.NULL : result.error);
             root.put("tabs", toTabRecordArray(tabs));
             String htmlFileName = batch.fileBaseName + ".html";
             String htmlPath = writeJsonToDownloadsNow(htmlFileName, toNetscapeBookmarksHtml(batch, tabs));
+            result.htmlExportPath = htmlPath;
             root.put("htmlExportPath", htmlPath == null ? JSONObject.NULL : "Download/ViaTabsAgent/" + htmlFileName);
             String fileName = batch.fileBaseName + ".json";
             root.put("exportPath", "Download/ViaTabsAgent/" + fileName);
             String jsonPath = writeJsonToDownloadsNow(fileName, root.toString(2));
+            result.jsonExportPath = jsonPath;
             if (htmlPath != null) {
                 log("wrote bookmark import html: " + htmlPath);
             }
@@ -1738,7 +2049,7 @@ public class Hook implements IXposedHookLoadPackage {
         for (TabRecord record : records) {
             JSONObject tab = new JSONObject();
             tab.put("index", record.index);
-            tab.put("title", record.title);
+            tab.put("title", displayTitleForBookmark(record));
             tab.put("url", record.url);
             tabs.put(tab);
         }
@@ -1786,12 +2097,9 @@ public class Hook implements IXposedHookLoadPackage {
             if (tab == null || !isBookmarkableUrl(tab.url)) {
                 continue;
             }
-            String title = tab.title == null || tab.title.trim().length() == 0
-                    ? titleFromUrl(tab.url)
-                    : tab.title.trim();
             html.append(indent).append("<DT><A HREF=\"").append(escapeBookmarkHtml(tab.url))
                     .append("\" ADD_DATE=\"").append(addDate).append("\">")
-                    .append(escapeBookmarkHtml(title)).append("</A>\n");
+                    .append(escapeBookmarkHtml(displayTitleForBookmark(tab))).append("</A>\n");
         }
     }
 
@@ -2087,7 +2395,7 @@ public class Hook implements IXposedHookLoadPackage {
             byte[] data = payload.getBytes(StandardCharsets.UTF_8);
             stream = new FileOutputStream(out, false);
             stream.write(data);
-            log("wrote " + out.getAbsolutePath());
+            logSnapshotWrite(out);
         } catch (Throwable t) {
             log("write file failed: " + t);
         } finally {
@@ -2227,6 +2535,8 @@ public class Hook implements IXposedHookLoadPackage {
 
     private static final class BookmarkSaveResult {
         String folderId;
+        String htmlExportPath;
+        String jsonExportPath;
         int inserted;
         int skipped;
         String error;
@@ -2236,16 +2546,34 @@ public class Hook implements IXposedHookLoadPackage {
         final String folderName;
         final String fileBaseName;
         final long addDate;
+        final int bookmarkCount;
         final boolean groupByDomain;
         final LinkedHashMap<String, List<TabRecord>> domainGroups;
 
-        BookmarkBatch(String folderName, String fileBaseName, long addDate, boolean groupByDomain,
-                      LinkedHashMap<String, List<TabRecord>> domainGroups) {
+        BookmarkBatch(String folderName, String fileBaseName, long addDate, int bookmarkCount,
+                      boolean groupByDomain, LinkedHashMap<String, List<TabRecord>> domainGroups) {
             this.folderName = folderName;
             this.fileBaseName = fileBaseName;
             this.addDate = addDate;
+            this.bookmarkCount = bookmarkCount;
             this.groupByDomain = groupByDomain;
             this.domainGroups = domainGroups;
         }
+    }
+
+    private static void logSnapshotWrite(File out) {
+        if (out == null) {
+            return;
+        }
+        String path = out.getAbsolutePath();
+        long now = System.currentTimeMillis();
+        synchronized (LAST_FILE_LOG_AT) {
+            Long previous = LAST_FILE_LOG_AT.get(path);
+            if (previous != null && now - previous.longValue() < SNAPSHOT_LOG_INTERVAL_MS) {
+                return;
+            }
+            LAST_FILE_LOG_AT.put(path, now);
+        }
+        log("wrote " + path);
     }
 }

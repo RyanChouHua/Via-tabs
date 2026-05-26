@@ -12,6 +12,8 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONObject;
+
 public class MainActivity extends Activity {
     private TextView logView;
     private TextView statusView;
@@ -198,6 +200,10 @@ public class MainActivity extends Activity {
         status.append("标签导入到书签: ").append(bookmarkImport ? "开启" : "关闭").append("\n");
         status.append("按域名整理: ").append(domainGroup ? "开启" : "关闭").append("\n");
         status.append("注入状态: 查看日志中是否出现 module attached in mark.via / mark.via.gp");
+        String lastResult = formatLastResult(AgentStore.getLastSaveResult(this));
+        if (lastResult.length() > 0) {
+            status.append("\n\n最近一次结果:\n").append(lastResult);
+        }
         statusView.setText(status.toString());
         if (exportSwitch != null) {
             exportSwitch.setChecked(enabled);
@@ -210,6 +216,45 @@ public class MainActivity extends Activity {
         }
         if (domainGroupSwitch != null) {
             domainGroupSwitch.setChecked(domainGroup);
+        }
+    }
+
+    private String formatLastResult(String payload) {
+        if (payload == null || payload.trim().length() == 0) {
+            return "";
+        }
+        try {
+            JSONObject root = new JSONObject(payload);
+            StringBuilder result = new StringBuilder();
+            result.append("时间: ").append(root.optString("time", "-")).append("\n");
+            result.append("来源: ").append(root.optString("source", "-")).append("\n");
+            result.append("文件夹: ").append(root.optString("folder", "-")).append("\n");
+            result.append("捕获/可保存: ")
+                    .append(root.optInt("captured", 0))
+                    .append("/")
+                    .append(root.optInt("bookmarkable", 0))
+                    .append("\n");
+            result.append("导入/跳过: ")
+                    .append(root.optInt("inserted", 0))
+                    .append("/")
+                    .append(root.optInt("skipped", 0))
+                    .append("\n");
+            result.append("按域名整理: ").append(root.optBoolean("domainGroup", false) ? "开启" : "关闭").append("\n");
+            String html = root.optString("htmlExportPath", "");
+            String json = root.optString("jsonExportPath", "");
+            if (html.length() > 0 && !"null".equals(html)) {
+                result.append("HTML: ").append(html).append("\n");
+            }
+            if (json.length() > 0 && !"null".equals(json)) {
+                result.append("JSON: ").append(json).append("\n");
+            }
+            String error = root.optString("error", "");
+            if (error.length() > 0 && !"null".equals(error)) {
+                result.append("错误: ").append(error).append("\n");
+            }
+            return result.toString().trim();
+        } catch (Throwable t) {
+            return "读取最近结果失败: " + t;
         }
     }
 

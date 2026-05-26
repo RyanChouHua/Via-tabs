@@ -1,6 +1,7 @@
 package com.viatabs.agent;
 
 import android.app.Activity;
+import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
@@ -12,6 +13,7 @@ import android.widget.Toast;
 
 public class MainActivity extends Activity {
     private TextView logView;
+    private TextView statusView;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -36,6 +38,12 @@ public class MainActivity extends Activity {
         info.setTextSize(14f);
         info.setPadding(0, 18, 0, 18);
         root.addView(info, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        statusView = new TextView(this);
+        statusView.setTextSize(14f);
+        statusView.setPadding(0, 0, 0, 18);
+        root.addView(statusView, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         LinearLayout buttons = new LinearLayout(this);
@@ -67,6 +75,17 @@ public class MainActivity extends Activity {
         root.addView(buttons, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
+        Button testExport = new Button(this);
+        testExport.setText("测试导出");
+        testExport.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                runTestExport();
+            }
+        });
+        root.addView(testExport, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
         logView = new TextView(this);
         logView.setTextSize(12f);
         logView.setTextIsSelectable(true);
@@ -80,13 +99,52 @@ public class MainActivity extends Activity {
 
         setContentView(root);
         AgentStore.appendLog(this, "打开模块界面");
+        refreshStatus();
         refreshLog();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        refreshStatus();
         refreshLog();
+    }
+
+    private void refreshStatus() {
+        StringBuilder status = new StringBuilder();
+        status.append("模块版本：").append(BuildConfig.VERSION_NAME)
+                .append(" (").append(BuildConfig.VERSION_CODE).append(")\n");
+        status.append("mark.via：").append(isPackageInstalled("mark.via") ? "已安装" : "未安装").append("\n");
+        status.append("mark.via.gp：").append(isPackageInstalled("mark.via.gp") ? "已安装" : "未安装").append("\n");
+        status.append("注入状态：看日志中是否出现 module attached in mark.via / mark.via.gp");
+        statusView.setText(status.toString());
+    }
+
+    private boolean isPackageInstalled(String packageName) {
+        try {
+            getPackageManager().getPackageInfo(packageName, 0);
+            return true;
+        } catch (PackageManager.NameNotFoundException ignored) {
+            return false;
+        }
+    }
+
+    private void runTestExport() {
+        try {
+            String fileName = "saved-bookmarks-test-" + System.currentTimeMillis() + ".json";
+            String payload = "{\n"
+                    + "  \"source\": \"module-test-export\",\n"
+                    + "  \"message\": \"如果这个文件存在，说明模块 App 写入 Download 正常\"\n"
+                    + "}\n";
+            String path = AgentStore.writeDownloadFile(this, fileName, payload);
+            AgentStore.appendLog(this, "测试导出成功: " + path);
+            refreshLog();
+            Toast.makeText(this, "测试导出成功", Toast.LENGTH_SHORT).show();
+        } catch (Throwable t) {
+            AgentStore.appendLog(this, "测试导出失败: " + t);
+            refreshLog();
+            Toast.makeText(this, "测试导出失败", Toast.LENGTH_SHORT).show();
+        }
     }
 
     private void refreshLog() {

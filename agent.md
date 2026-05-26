@@ -454,14 +454,14 @@ ViaTabsAgent/app/src/main/java/com/viatabs/agent/Hook.java
 1. 在 LSPosed 中启用 ViaTabsAgent 模块。
 2. 作用域选择 `mark.via` 和/或 `mark.via.gp`。
 3. 强制停止并重新打开 Via。
-4. 进入 Via 后，页面右侧会出现 `Tabs` 悬浮按钮。
-5. 点击 `Tabs`，在面板中选择：
-   - `Save tabs to bookmarks`
-   - `Create tab group`
-   - `Restore latest group`
-   - `Archive latest group`
-   - `Delete latest group`
-   - `Refresh tabs snapshot`
+4. 进入 Via 后，页面右侧会出现 `标签` 悬浮按钮。
+5. 点击 `标签`，在中文面板中选择：
+   - `保存当前标签到书签`
+   - `创建标签分组`
+   - `恢复最近分组`
+   - `归档最近分组`
+   - `删除最近分组`
+   - `刷新标签快照`
 
 当前面板是最小可用版本，优先保证不破坏 Via 原有界面。后续可以继续迭代为底部操作栏、Via 菜单项或独立模块 Activity。
 

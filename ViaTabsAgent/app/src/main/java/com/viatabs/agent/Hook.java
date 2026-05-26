@@ -290,7 +290,7 @@ public class Hook implements IXposedHookLoadPackage {
             return;
         }
         final TextView button = new TextView(activity);
-        button.setText("Tabs");
+        button.setText("标签");
         button.setTextColor(0xffffffff);
         button.setTextSize(12f);
         button.setGravity(Gravity.CENTER);
@@ -316,15 +316,15 @@ public class Hook implements IXposedHookLoadPackage {
 
     private static void showOperationPanel(final Activity activity) {
         final String[] actions = new String[]{
-                "Save tabs to bookmarks",
-                "Create tab group",
-                "Restore latest group",
-                "Archive latest group",
-                "Delete latest group",
-                "Refresh tabs snapshot"
+                "保存当前标签到书签",
+                "创建标签分组",
+                "恢复最近分组",
+                "归档最近分组",
+                "删除最近分组",
+                "刷新标签快照"
         };
         new AlertDialog.Builder(activity)
-                .setTitle("Via Tabs")
+                .setTitle("Via 标签")
                 .setItems(actions, new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
@@ -340,7 +340,7 @@ public class Hook implements IXposedHookLoadPackage {
                             deleteLatestGroupFromPanel(activity);
                         } else if (which == 5) {
                             snapshotFromLastTabManager("panel.dump");
-                            toast(activity, "Snapshot refreshed");
+                            toast(activity, "已刷新标签快照");
                         }
                     }
                 })
@@ -351,18 +351,18 @@ public class Hook implements IXposedHookLoadPackage {
         final EditText input = new EditText(activity);
         input.setSingleLine(true);
         input.setText(defaultGroupName());
-        input.setHint("Bookmark folder");
+        input.setHint("书签文件夹名称");
         new AlertDialog.Builder(activity)
-                .setTitle("Save current tabs")
+                .setTitle("保存当前标签")
                 .setView(input)
-                .setPositiveButton("Save", new DialogInterface.OnClickListener() {
+                .setPositiveButton("保存", new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
                         saveCurrentTabsToBookmarks(textOrDefault(input, "ViaTabsAgent"));
-                        toast(activity, "Saving tabs to bookmarks");
+                        toast(activity, "正在保存到书签");
                     }
                 })
-                .setNegativeButton("Cancel", null)
+                .setNegativeButton("取消", null)
                 .show();
     }
 
@@ -375,37 +375,37 @@ public class Hook implements IXposedHookLoadPackage {
         final EditText name = new EditText(activity);
         name.setSingleLine(true);
         name.setText(defaultGroupName());
-        name.setHint("Group name");
+        name.setHint("分组名称");
         layout.addView(name, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         final EditText color = new EditText(activity);
         color.setSingleLine(true);
-        color.setText("green");
-        color.setHint("Color: blue, green, purple...");
+        color.setText("绿色");
+        color.setHint("颜色：蓝色、绿色、紫色...");
         layout.addView(color, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         final CheckBox bookmarks = new CheckBox(activity);
-        bookmarks.setText("Also save to Via bookmarks");
+        bookmarks.setText("同时保存到 Via 书签");
         bookmarks.setChecked(true);
         layout.addView(bookmarks, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         final CheckBox archived = new CheckBox(activity);
-        archived.setText("Archive this group");
+        archived.setText("创建后归档该分组");
         archived.setChecked(false);
         layout.addView(archived, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         new AlertDialog.Builder(activity)
-                .setTitle("Create tab group")
+                .setTitle("创建标签分组")
                 .setView(layout)
-                .setPositiveButton("Create", new DialogInterface.OnClickListener() {
+                .setPositiveButton("创建", new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
                         groupCurrentTabs(null, textOrDefault(name, defaultGroupName()),
                                 textOrDefault(color, "blue"), bookmarks.isChecked(), archived.isChecked(), false);
-                        toast(activity, "Creating group");
+                        toast(activity, "正在创建分组");
                     }
                 })
-                .setNegativeButton("Cancel", null)
+                .setNegativeButton("取消", null)
                 .show();
     }
 
@@ -413,14 +413,14 @@ public class Hook implements IXposedHookLoadPackage {
         try {
             JSONObject latest = latestTabGroup(false);
             if (latest == null) {
-                toast(activity, "No group found");
+                toast(activity, "没有可恢复的分组");
                 return;
             }
             restoreTabGroup(latest.optString("groupId"), null, true, -1, null);
-            toast(activity, "Restoring " + latest.optString("group", "group"));
+            toast(activity, "正在恢复：" + latest.optString("group", "分组"));
         } catch (Throwable t) {
             log("panel restore latest failed: " + t);
-            toast(activity, "Restore failed");
+            toast(activity, "恢复失败");
         }
     }
 
@@ -428,14 +428,14 @@ public class Hook implements IXposedHookLoadPackage {
         try {
             JSONObject latest = latestTabGroup(false);
             if (latest == null) {
-                toast(activity, "No group found");
+                toast(activity, "没有可归档的分组");
                 return;
             }
             updateTabGroupArchive(latest.optString("groupId"), null, true);
-            toast(activity, "Archived " + latest.optString("group", "group"));
+            toast(activity, "已归档：" + latest.optString("group", "分组"));
         } catch (Throwable t) {
             log("panel archive latest failed: " + t);
-            toast(activity, "Archive failed");
+            toast(activity, "归档失败");
         }
     }
 
@@ -443,14 +443,14 @@ public class Hook implements IXposedHookLoadPackage {
         try {
             JSONObject latest = latestTabGroup(true);
             if (latest == null) {
-                toast(activity, "No group found");
+                toast(activity, "没有可删除的分组");
                 return;
             }
             deleteTabGroup(latest.optString("groupId"), null);
-            toast(activity, "Deleted " + latest.optString("group", "group"));
+            toast(activity, "已删除：" + latest.optString("group", "分组"));
         } catch (Throwable t) {
             log("panel delete latest failed: " + t);
-            toast(activity, "Delete failed");
+            toast(activity, "删除失败");
         }
     }
 
@@ -469,7 +469,7 @@ public class Hook implements IXposedHookLoadPackage {
     }
 
     private static String defaultGroupName() {
-        return "Via Tabs " + (System.currentTimeMillis() / 1000L);
+        return "Via 标签 " + (System.currentTimeMillis() / 1000L);
     }
 
     private static String textOrDefault(EditText input, String fallback) {
@@ -1127,6 +1127,23 @@ public class Hook implements IXposedHookLoadPackage {
             return "blue";
         }
         String safe = color.trim().toLowerCase();
+        if ("红色".equals(safe)) {
+            return "red";
+        } else if ("橙色".equals(safe)) {
+            return "orange";
+        } else if ("黄色".equals(safe)) {
+            return "yellow";
+        } else if ("绿色".equals(safe)) {
+            return "green";
+        } else if ("蓝色".equals(safe)) {
+            return "blue";
+        } else if ("紫色".equals(safe)) {
+            return "purple";
+        } else if ("粉色".equals(safe)) {
+            return "pink";
+        } else if ("灰色".equals(safe)) {
+            return "gray";
+        }
         if ("red".equals(safe) || "orange".equals(safe) || "yellow".equals(safe)
                 || "green".equals(safe) || "blue".equals(safe) || "purple".equals(safe)
                 || "pink".equals(safe) || "gray".equals(safe)) {

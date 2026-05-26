@@ -232,6 +232,9 @@ public class Hook implements IXposedHookLoadPackage {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     lastTabManager = param.thisObject;
+                    if (Boolean.TRUE.equals(IN_MANAGER_SNAPSHOT.get())) {
+                        return;
+                    }
                     Object result = param.getResult();
                     if (result instanceof List) {
                         writeTabsSnapshot("tabManager.C", (List<?>) result, null);
@@ -336,8 +339,8 @@ public class Hook implements IXposedHookLoadPackage {
                 root.put("current", current.intValue());
             }
             root.put("tabs", toUrlArray(urls));
-            writeJson(root);
-            if (isTabManagerSource(source)) {
+            boolean wrote = writeJson(root);
+            if (wrote && isTabManagerSource(source)) {
                 persistAgentSession(source, urls);
             }
         } catch (Throwable t) {
@@ -387,11 +390,20 @@ public class Hook implements IXposedHookLoadPackage {
             @Override
             public void run() {
                 try {
-                    List<TabRecord> tabs = snapshotTabRecords(manager);
-                    BookmarkSaveResult result = saveTabsToViaBookmarks(folderName, tabs);
-                    writeBookmarkSaveSnapshot(folderName, tabs, result);
-                    log("saved tabs to bookmarks: folder=" + folderName + " tabs=" + tabs.size()
-                            + " inserted=" + result.inserted + " skipped=" + result.skipped);
+                    final List<TabRecord> tabs = snapshotTabRecords(manager);
+                    WRITER.execute(new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                BookmarkSaveResult result = saveTabsToViaBookmarks(folderName, tabs);
+                                writeBookmarkSaveSnapshot(folderName, tabs, result);
+                                log("saved tabs to bookmarks: folder=" + folderName + " tabs=" + tabs.size()
+                                        + " inserted=" + result.inserted + " skipped=" + result.skipped);
+                            } catch (Throwable t) {
+                                log("saveCurrentTabsToBookmarks background failed: " + t);
+                            }
+                        }
+                    });
                 } catch (Throwable t) {
                     log("saveCurrentTabsToBookmarks failed: " + t);
                 }
@@ -399,24 +411,38 @@ public class Hook implements IXposedHookLoadPackage {
         });
     }
 
-    private static void groupCurrentTabs(String groupName, boolean saveBookmarks) {
-        Object manager = lastTabManager;
-        if (manager == null) {
+    private static void groupCurrentTabs(final String groupName, final boolean saveBookmarks) {
+        final Object manager = lastTabManager;
+        if (manager == null || mainHandler == null) {
             log("groupCurrentTabs skipped: tab manager not ready");
             return;
         }
-        String safeGroup = groupName == null || groupName.trim().length() == 0
-                ? "ViaTabs " + System.currentTimeMillis()
-                : groupName.trim();
-        try {
-            List<TabRecord> tabs = snapshotTabRecords(manager);
-            BookmarkSaveResult result = saveBookmarks ? saveTabsToViaBookmarks(safeGroup, tabs) : new BookmarkSaveResult();
-            writeTabGroupSnapshot(safeGroup, tabs, result);
-            log("grouped tabs: group=" + safeGroup + " tabs=" + tabs.size()
-                    + " bookmarks=" + saveBookmarks + " inserted=" + result.inserted);
-        } catch (Throwable t) {
-            log("groupCurrentTabs failed: " + t);
-        }
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                final String safeGroup = groupName == null || groupName.trim().length() == 0
+                        ? "ViaTabs " + System.currentTimeMillis()
+                        : groupName.trim();
+                try {
+                    final List<TabRecord> tabs = snapshotTabRecords(manager);
+                    WRITER.execute(new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                BookmarkSaveResult result = saveBookmarks ? saveTabsToViaBookmarks(safeGroup, tabs) : new BookmarkSaveResult();
+                                writeTabGroupSnapshot(safeGroup, tabs, result);
+                                log("grouped tabs: group=" + safeGroup + " tabs=" + tabs.size()
+                                        + " bookmarks=" + saveBookmarks + " inserted=" + result.inserted);
+                            } catch (Throwable t) {
+                                log("groupCurrentTabs background failed: " + t);
+                            }
+                        }
+                    });
+                } catch (Throwable t) {
+                    log("groupCurrentTabs failed: " + t);
+                }
+            }
+        });
     }
 
     private static List<TabRecord> snapshotTabRecords(Object manager) {
@@ -484,10 +510,13 @@ public class Hook implements IXposedHookLoadPackage {
         if (appContext == null || tabs.isEmpty()) {
             return result;
         }
-        SQLiteDatabase db = appContext.openOrCreateDatabase("via", Context.MODE_PRIVATE, null);
-        ensureBookmarkTables(db);
-        db.beginTransaction();
+        SQLiteDatabase db = null;
+        boolean transactionStarted = false;
         try {
+            db = appContext.openOrCreateDatabase("via", Context.MODE_PRIVATE, null);
+            ensureBookmarkTables(db);
+            db.beginTransaction();
+            transactionStarted = true;
             String folderId = ensureBookmarkFolder(db, folderName);
             int ordering = maxOrdering(db, "bookmark_items", "folder_id", folderId) + 1;
             long now = System.currentTimeMillis() / 1000L;
@@ -518,7 +547,15 @@ public class Hook implements IXposedHookLoadPackage {
             db.setTransactionSuccessful();
             result.folderId = folderId;
         } finally {
-            db.endTransaction();
+            if (db != null) {
+                try {
+                    if (transactionStarted) {
+                        db.endTransaction();
+                    }
+                } finally {
+                    db.close();
+                }
+            }
         }
         return result;
     }
@@ -608,7 +645,7 @@ public class Hook implements IXposedHookLoadPackage {
             root.put("inserted", result.inserted);
             root.put("skipped", result.skipped);
             root.put("tabs", toTabRecordArray(tabs));
-            writeJsonToFile(new File(agentDir(), "saved-bookmarks.json"), root.toString(2));
+            writeJsonToFileNow(new File(agentDir(), "saved-bookmarks.json"), root.toString(2));
         } catch (Throwable t) {
             log("write bookmark save snapshot failed: " + t);
         }
@@ -637,7 +674,7 @@ public class Hook implements IXposedHookLoadPackage {
             groups.put(group);
             JSONObject root = baseSnapshot("tabs.groups");
             root.put("groups", groups);
-            writeJsonToFile(file, root.toString(2));
+            writeJsonToFileNow(file, root.toString(2));
         } catch (Throwable t) {
             log("write tab group snapshot failed: " + t);
         }
@@ -895,9 +932,9 @@ public class Hook implements IXposedHookLoadPackage {
         return urls;
     }
 
-    private static void writeJson(JSONObject root) throws Exception {
+    private static boolean writeJson(JSONObject root) throws Exception {
         if (appContext == null) {
-            return;
+            return false;
         }
         File dir = agentDir();
         final File out = new File(dir, isTabManagerSource(root.optString("source")) ? "tabs.json" : "webview-fallback.json");
@@ -911,12 +948,13 @@ public class Hook implements IXposedHookLoadPackage {
             String previous = LAST_PAYLOAD.get(key);
             Long previousAt = LAST_WRITE_AT.get(key);
             if (signature.equals(previous) && previousAt != null && now - previousAt.longValue() < MIN_WRITE_INTERVAL_MS) {
-                return;
+                return false;
             }
             LAST_PAYLOAD.put(key, signature);
             LAST_WRITE_AT.put(key, now);
         }
         writeJsonToFile(out, payload);
+        return true;
     }
 
     private static File agentDir() {
@@ -931,24 +969,28 @@ public class Hook implements IXposedHookLoadPackage {
         WRITER.execute(new Runnable() {
             @Override
             public void run() {
-                FileOutputStream stream = null;
-                try {
-                    byte[] data = payload.getBytes(StandardCharsets.UTF_8);
-                    stream = new FileOutputStream(out, false);
-                    stream.write(data);
-                    log("wrote " + out.getAbsolutePath());
-                } catch (Throwable t) {
-                    log("async write failed: " + t);
-                } finally {
-                    if (stream != null) {
-                        try {
-                            stream.close();
-                        } catch (Throwable ignored) {
-                        }
-                    }
-                }
+                writeJsonToFileNow(out, payload);
             }
         });
+    }
+
+    private static void writeJsonToFileNow(File out, String payload) {
+        FileOutputStream stream = null;
+        try {
+            byte[] data = payload.getBytes(StandardCharsets.UTF_8);
+            stream = new FileOutputStream(out, false);
+            stream.write(data);
+            log("wrote " + out.getAbsolutePath());
+        } catch (Throwable t) {
+            log("write file failed: " + t);
+        } finally {
+            if (stream != null) {
+                try {
+                    stream.close();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
     }
 
     private static boolean isTabManagerSource(String source) {

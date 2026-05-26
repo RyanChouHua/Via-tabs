@@ -16,8 +16,8 @@ public class MainActivity extends Activity {
     private TextView logView;
     private TextView statusView;
     private CheckBox exportSwitch;
-    private CheckBox saveToViaSwitch;
-    private CheckBox exportFileSwitch;
+    private CheckBox tabExportSwitch;
+    private CheckBox bookmarkImportSwitch;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -36,8 +36,8 @@ public class MainActivity extends Activity {
 
         TextView info = new TextView(this);
         info.setText("LSPosed 模块安装后，请在 LSPosed 中启用并勾选 mark.via / mark.via.gp。\n"
-                + "Via 内显示“书签”按钮，导出目录：/storage/emulated/0/Download/ViaTabsAgent/\n"
-                + "书签文件名：书签-日期-数量.html / 书签-日期-数量.json\n"
+                + "Via 内只保留导出书签按钮，导出目录：/storage/emulated/0/Download/ViaTabsAgent/\n"
+                + "书签文件名：via-日期-数量.html / via-日期-数量.json\n"
                 + "日志文件：/storage/emulated/0/Download/ViaTabsAgent/agent-log.txt");
         info.setTextSize(14f);
         info.setPadding(0, 18, 0, 18);
@@ -67,38 +67,38 @@ public class MainActivity extends Activity {
         root.addView(exportSwitch, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
-        saveToViaSwitch = new CheckBox(this);
-        saveToViaSwitch.setText("保存并导入到 Via 书签");
-        saveToViaSwitch.setChecked(AgentStore.isSaveToViaEnabled(this));
-        saveToViaSwitch.setOnClickListener(new View.OnClickListener() {
+        tabExportSwitch = new CheckBox(this);
+        tabExportSwitch.setText("标签导出功能");
+        tabExportSwitch.setChecked(AgentStore.isTabExportEnabled(this));
+        tabExportSwitch.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                boolean enabled = saveToViaSwitch.isChecked();
-                AgentStore.setSaveToViaEnabled(MainActivity.this, enabled);
-                AgentStore.appendLog(MainActivity.this, "保存到 Via 书签: " + (enabled ? "开启" : "关闭"));
+                boolean enabled = tabExportSwitch.isChecked();
+                AgentStore.setTabExportEnabled(MainActivity.this, enabled);
+                AgentStore.appendLog(MainActivity.this, "标签导出功能: " + (enabled ? "开启" : "关闭"));
                 refreshStatus();
                 refreshLog();
-                Toast.makeText(MainActivity.this, enabled ? "已启用保存到 Via 书签" : "已关闭保存到 Via 书签", Toast.LENGTH_SHORT).show();
+                Toast.makeText(MainActivity.this, enabled ? "已启用标签导出" : "已关闭标签导出", Toast.LENGTH_SHORT).show();
             }
         });
-        root.addView(saveToViaSwitch, new LinearLayout.LayoutParams(
+        root.addView(tabExportSwitch, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
-        exportFileSwitch = new CheckBox(this);
-        exportFileSwitch.setText("导出 HTML/JSON 书签文件");
-        exportFileSwitch.setChecked(AgentStore.isExportFileEnabled(this));
-        exportFileSwitch.setOnClickListener(new View.OnClickListener() {
+        bookmarkImportSwitch = new CheckBox(this);
+        bookmarkImportSwitch.setText("标签导入到书签");
+        bookmarkImportSwitch.setChecked(AgentStore.isBookmarkImportEnabled(this));
+        bookmarkImportSwitch.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                boolean enabled = exportFileSwitch.isChecked();
-                AgentStore.setExportFileEnabled(MainActivity.this, enabled);
-                AgentStore.appendLog(MainActivity.this, "导出文件: " + (enabled ? "开启" : "关闭"));
+                boolean enabled = bookmarkImportSwitch.isChecked();
+                AgentStore.setBookmarkImportEnabled(MainActivity.this, enabled);
+                AgentStore.appendLog(MainActivity.this, "标签导入到书签: " + (enabled ? "开启" : "关闭"));
                 refreshStatus();
                 refreshLog();
-                Toast.makeText(MainActivity.this, enabled ? "已启用导出文件" : "已关闭导出文件", Toast.LENGTH_SHORT).show();
+                Toast.makeText(MainActivity.this, enabled ? "已启用导入书签" : "已关闭导入书签", Toast.LENGTH_SHORT).show();
             }
         });
-        root.addView(exportFileSwitch, new LinearLayout.LayoutParams(
+        root.addView(bookmarkImportSwitch, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         LinearLayout buttons = new LinearLayout(this);
@@ -167,26 +167,26 @@ public class MainActivity extends Activity {
 
     private void refreshStatus() {
         boolean enabled = AgentStore.isExportEnabled(this);
-        boolean saveToVia = AgentStore.isSaveToViaEnabled(this);
-        boolean exportFile = AgentStore.isExportFileEnabled(this);
+        boolean tabExport = AgentStore.isTabExportEnabled(this);
+        boolean bookmarkImport = AgentStore.isBookmarkImportEnabled(this);
         StringBuilder status = new StringBuilder();
         status.append("模块版本: ").append(BuildConfig.VERSION_NAME)
                 .append(" (").append(BuildConfig.VERSION_CODE).append(")\n");
         status.append("mark.via: ").append(isPackageInstalled("mark.via") ? "已安装" : "未安装").append("\n");
         status.append("mark.via.gp: ").append(isPackageInstalled("mark.via.gp") ? "已安装" : "未安装").append("\n");
-        status.append("工具栏入口: ").append(enabled ? "开启" : "关闭").append("\n");
-        status.append("保存到 Via 书签: ").append(saveToVia ? "开启" : "关闭").append("\n");
-        status.append("导出书签文件: ").append(exportFile ? "开启" : "关闭").append("\n");
+        status.append("按钮开关: ").append(enabled ? "开启" : "关闭").append("\n");
+        status.append("标签导出功能: ").append(tabExport ? "开启" : "关闭").append("\n");
+        status.append("标签导入到书签: ").append(bookmarkImport ? "开启" : "关闭").append("\n");
         status.append("注入状态: 查看日志中是否出现 module attached in mark.via / mark.via.gp");
         statusView.setText(status.toString());
         if (exportSwitch != null) {
             exportSwitch.setChecked(enabled);
         }
-        if (saveToViaSwitch != null) {
-            saveToViaSwitch.setChecked(saveToVia);
+        if (tabExportSwitch != null) {
+            tabExportSwitch.setChecked(tabExport);
         }
-        if (exportFileSwitch != null) {
-            exportFileSwitch.setChecked(exportFile);
+        if (bookmarkImportSwitch != null) {
+            bookmarkImportSwitch.setChecked(bookmarkImport);
         }
     }
 
@@ -201,7 +201,7 @@ public class MainActivity extends Activity {
 
     private void runTestExport() {
         try {
-            String fileName = "书签-测试-" + System.currentTimeMillis() + "-1.json";
+            String fileName = "via-test-" + System.currentTimeMillis() + "-1.json";
             String payload = "{\n"
                     + "  \"source\": \"module-test-export\",\n"
                     + "  \"message\": \"如果这个文件存在，说明模块 App 写入 Download 正常\"\n"
@@ -224,7 +224,7 @@ public class MainActivity extends Activity {
                     + "操作顺序:\n"
                     + "1. 在 LSPosed 启用 ViaTabsAgent，并勾选 Via。\n"
                     + "2. 强制停止 Via 后重新打开。\n"
-                    + "3. 在 Via 工具栏内点击“书签”入口保存/导出。\n"
+                    + "3. 在 Via 内点击“书签”按钮导出。\n"
                     + "4. 回到这里点击“刷新日志”。";
         } else if (!log.contains("module attached in")
                 && !log.contains("loaded in mark.via")

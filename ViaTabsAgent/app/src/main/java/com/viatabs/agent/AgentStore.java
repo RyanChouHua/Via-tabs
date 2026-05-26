@@ -29,8 +29,8 @@ final class AgentStore {
     static final String LOG_FILE = "agent-log.txt";
     static final String PREFS = "via_tabs_agent";
     static final String KEY_EXPORT_ENABLED = "export_enabled";
-    static final String KEY_SAVE_TO_VIA_ENABLED = "save_to_via_enabled";
-    static final String KEY_EXPORT_FILE_ENABLED = "export_file_enabled";
+    static final String KEY_TAB_EXPORT_ENABLED = "tab_export_enabled";
+    static final String KEY_BOOKMARK_IMPORT_ENABLED = "bookmark_import_enabled";
 
     private static final int MAX_LOG_BYTES = 64 * 1024;
 
@@ -50,7 +50,7 @@ final class AgentStore {
     private static boolean isSupportedExportName(String fileName) {
         return BOOKMARKS_FILE.equals(fileName)
                 || LOG_FILE.equals(fileName)
-                || (fileName != null && fileName.startsWith("书签-")
+                || (fileName != null && fileName.startsWith("via-")
                 && (fileName.endsWith(".json") || fileName.endsWith(".html")));
     }
 
@@ -72,39 +72,39 @@ final class AgentStore {
                 .apply();
     }
 
-    static boolean isSaveToViaEnabled(Context context) {
+    static boolean isTabExportEnabled(Context context) {
         if (context == null) {
             return true;
         }
         SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        return prefs.getBoolean(KEY_SAVE_TO_VIA_ENABLED, true);
+        return prefs.getBoolean(KEY_TAB_EXPORT_ENABLED, true);
     }
 
-    static void setSaveToViaEnabled(Context context, boolean enabled) {
+    static void setTabExportEnabled(Context context, boolean enabled) {
         if (context == null) {
             return;
         }
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit()
-                .putBoolean(KEY_SAVE_TO_VIA_ENABLED, enabled)
+                .putBoolean(KEY_TAB_EXPORT_ENABLED, enabled)
                 .apply();
     }
 
-    static boolean isExportFileEnabled(Context context) {
+    static boolean isBookmarkImportEnabled(Context context) {
         if (context == null) {
             return true;
         }
         SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        return prefs.getBoolean(KEY_EXPORT_FILE_ENABLED, true);
+        return prefs.getBoolean(KEY_BOOKMARK_IMPORT_ENABLED, true);
     }
 
-    static void setExportFileEnabled(Context context, boolean enabled) {
+    static void setBookmarkImportEnabled(Context context, boolean enabled) {
         if (context == null) {
             return;
         }
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit()
-                .putBoolean(KEY_EXPORT_FILE_ENABLED, enabled)
+                .putBoolean(KEY_BOOKMARK_IMPORT_ENABLED, enabled)
                 .apply();
     }
 

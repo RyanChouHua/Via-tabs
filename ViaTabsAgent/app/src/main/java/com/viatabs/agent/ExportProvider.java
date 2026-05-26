@@ -14,8 +14,8 @@ public class ExportProvider extends ContentProvider {
     static final String METHOD_GET_EXPORT_ENABLED = "getExportEnabled";
     static final String METHOD_SET_EXPORT_ENABLED = "setExportEnabled";
     static final String METHOD_GET_SETTINGS = "getSettings";
-    static final String METHOD_SET_SAVE_TO_VIA_ENABLED = "setSaveToViaEnabled";
-    static final String METHOD_SET_EXPORT_FILE_ENABLED = "setExportFileEnabled";
+    static final String METHOD_SET_TAB_EXPORT_ENABLED = "setTabExportEnabled";
+    static final String METHOD_SET_BOOKMARK_IMPORT_ENABLED = "setBookmarkImportEnabled";
     static final String EXTRA_FILE_NAME = "fileName";
     static final String EXTRA_PAYLOAD = "payload";
     static final String EXTRA_MESSAGE = "message";
@@ -23,8 +23,8 @@ public class ExportProvider extends ContentProvider {
     static final String EXTRA_LOG = "log";
     static final String EXTRA_ENABLED = "enabled";
     static final String EXTRA_PANEL_ENABLED = "panelEnabled";
-    static final String EXTRA_SAVE_TO_VIA_ENABLED = "saveToViaEnabled";
-    static final String EXTRA_EXPORT_FILE_ENABLED = "exportFileEnabled";
+    static final String EXTRA_TAB_EXPORT_ENABLED = "tabExportEnabled";
+    static final String EXTRA_BOOKMARK_IMPORT_ENABLED = "bookmarkImportEnabled";
 
     @Override
     public boolean onCreate() {
@@ -60,18 +60,18 @@ public class ExportProvider extends ContentProvider {
                 result.putBoolean(EXTRA_ENABLED, enabled);
             } else if (METHOD_GET_SETTINGS.equals(method)) {
                 result.putBoolean(EXTRA_PANEL_ENABLED, AgentStore.isExportEnabled(getContext()));
-                result.putBoolean(EXTRA_SAVE_TO_VIA_ENABLED, AgentStore.isSaveToViaEnabled(getContext()));
-                result.putBoolean(EXTRA_EXPORT_FILE_ENABLED, AgentStore.isExportFileEnabled(getContext()));
-            } else if (METHOD_SET_SAVE_TO_VIA_ENABLED.equals(method)) {
-                boolean enabled = extras == null || extras.getBoolean(EXTRA_SAVE_TO_VIA_ENABLED, true);
-                AgentStore.setSaveToViaEnabled(getContext(), enabled);
-                AgentStore.appendLog(getContext(), "保存到 Via 书签: " + (enabled ? "开启" : "关闭"));
-                result.putBoolean(EXTRA_SAVE_TO_VIA_ENABLED, enabled);
-            } else if (METHOD_SET_EXPORT_FILE_ENABLED.equals(method)) {
-                boolean enabled = extras == null || extras.getBoolean(EXTRA_EXPORT_FILE_ENABLED, true);
-                AgentStore.setExportFileEnabled(getContext(), enabled);
-                AgentStore.appendLog(getContext(), "导出文件: " + (enabled ? "开启" : "关闭"));
-                result.putBoolean(EXTRA_EXPORT_FILE_ENABLED, enabled);
+                result.putBoolean(EXTRA_TAB_EXPORT_ENABLED, AgentStore.isTabExportEnabled(getContext()));
+                result.putBoolean(EXTRA_BOOKMARK_IMPORT_ENABLED, AgentStore.isBookmarkImportEnabled(getContext()));
+            } else if (METHOD_SET_TAB_EXPORT_ENABLED.equals(method)) {
+                boolean enabled = extras == null || extras.getBoolean(EXTRA_TAB_EXPORT_ENABLED, true);
+                AgentStore.setTabExportEnabled(getContext(), enabled);
+                AgentStore.appendLog(getContext(), "标签导出功能: " + (enabled ? "开启" : "关闭"));
+                result.putBoolean(EXTRA_TAB_EXPORT_ENABLED, enabled);
+            } else if (METHOD_SET_BOOKMARK_IMPORT_ENABLED.equals(method)) {
+                boolean enabled = extras == null || extras.getBoolean(EXTRA_BOOKMARK_IMPORT_ENABLED, true);
+                AgentStore.setBookmarkImportEnabled(getContext(), enabled);
+                AgentStore.appendLog(getContext(), "标签导入到书签: " + (enabled ? "开启" : "关闭"));
+                result.putBoolean(EXTRA_BOOKMARK_IMPORT_ENABLED, enabled);
             }
         } catch (Throwable t) {
             AgentStore.appendLog(getContext(), method + " 失败: " + t);

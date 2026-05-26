@@ -10,8 +10,6 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
-import android.graphics.drawable.GradientDrawable;
-import android.graphics.drawable.StateListDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -306,10 +304,9 @@ public class Hook implements IXposedHookLoadPackage {
         if (!VIA_CN.equals(packageName) && !VIA_GP.equals(packageName)) {
             return;
         }
-        final ExportSettings settings = readExportSettings();
-        if (!settings.panelEnabled) {
+        if (!isExportEnabled()) {
             removePanelButton(activity);
-            log("bookmark button hidden: panel disabled");
+            log("panel button hidden: export disabled");
             return;
         }
         if (PANEL_BUTTONS.containsKey(activity)) {
@@ -322,46 +319,32 @@ public class Hook implements IXposedHookLoadPackage {
         final TextView button = new TextView(activity);
         button.setText("\u4e66\u7b7e");
         button.setTextColor(0xffffffff);
-        button.setTextSize(13f);
+        button.setTextSize(12f);
         button.setGravity(Gravity.CENTER);
-        button.setSingleLine(true);
-        button.setPadding(dp(activity, 14), 0, dp(activity, 14), 0);
-        button.setMinWidth(dp(activity, 68));
-        button.setMinHeight(dp(activity, 44));
-        button.setBackground(makeButtonBackground(activity));
-        if (Build.VERSION.SDK_INT >= 21) {
-            button.setElevation(dp(activity, 6));
-            button.setTranslationZ(dp(activity, 2));
-        }
-        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(dp(activity, 76), dp(activity, 44));
+        button.setBackgroundColor(0xcc1f6feb);
+        button.setPadding(dp(activity, 10), dp(activity, 8), dp(activity, 10), dp(activity, 8));
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(dp(activity, 58), dp(activity, 42));
         params.gravity = Gravity.RIGHT | Gravity.CENTER_VERTICAL;
-        params.rightMargin = dp(activity, 10);
+        params.rightMargin = dp(activity, 8);
         try {
             content.addView(button, params);
             PANEL_BUTTONS.put(activity, button);
             button.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    ExportSettings current = readExportSettings();
-                    if (!current.panelEnabled) {
-                        toast(activity, "\u4e66\u7b7e\u5165\u53e3\u5df2\u5173\u95ed");
-                        log("bookmark button ignored: panel disabled");
-                        removePanelButton(activity);
+                    if (!isExportEnabled()) {
+                        toast(activity, "\u5bfc\u51fa\u5df2\u5173\u95ed");
+                        log("panel export ignored: export disabled");
                         return;
                     }
-                    if (!current.saveToViaEnabled && !current.exportFileEnabled) {
-                        toast(activity, "\u8bf7\u5148\u5728\u6a21\u5757\u4e2d\u5f00\u542f\u4fdd\u5b58\u6216\u5bfc\u51fa");
-                        log("bookmark button ignored: all actions disabled");
-                        return;
-                    }
-                    log("bookmark button clicked");
+                    log("panel export clicked");
                     saveCurrentTabsToBookmarks("\u4e66\u7b7e", activity);
-                    toast(activity, "\u6b63\u5728\u5904\u7406\u4e66\u7b7e");
+                    toast(activity, "\u6b63\u5728\u5bfc\u51fa\u4e66\u7b7e");
                 }
             });
-            log("installed styled bookmark button");
+            log("installed bookmark export button");
         } catch (Throwable t) {
-            log("install bookmark button failed: " + t);
+            log("install panel button failed: " + t);
         }
     }
 
@@ -378,24 +361,6 @@ public class Hook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             log("remove panel button failed: " + t);
         }
-    }
-
-    private static StateListDrawable makeButtonBackground(Context context) {
-        StateListDrawable states = new StateListDrawable();
-        states.addState(new int[]{android.R.attr.state_pressed},
-                roundedRect(context, 0xee185abc, 0xffdbeafe));
-        states.addState(new int[]{},
-                roundedRect(context, 0xee2563eb, 0xffffffff));
-        return states;
-    }
-
-    private static GradientDrawable roundedRect(Context context, int fillColor, int strokeColor) {
-        GradientDrawable drawable = new GradientDrawable();
-        drawable.setShape(GradientDrawable.RECTANGLE);
-        drawable.setColor(fillColor);
-        drawable.setCornerRadius(dp(context, 22));
-        drawable.setStroke(dp(context, 1), strokeColor);
-        return drawable;
     }
 
     private static boolean isExportEnabled() {
@@ -417,8 +382,8 @@ public class Hook implements IXposedHookLoadPackage {
             }
             return new ExportSettings(
                     result.getBoolean(ExportProvider.EXTRA_PANEL_ENABLED, true),
-                    result.getBoolean(ExportProvider.EXTRA_SAVE_TO_VIA_ENABLED, true),
-                    result.getBoolean(ExportProvider.EXTRA_EXPORT_FILE_ENABLED, true));
+                    result.getBoolean(ExportProvider.EXTRA_TAB_EXPORT_ENABLED, true),
+                    result.getBoolean(ExportProvider.EXTRA_BOOKMARK_IMPORT_ENABLED, true));
         } catch (Throwable t) {
             log("read export settings failed, default enabled: " + t);
             return new ExportSettings(true, true, true);
@@ -427,13 +392,13 @@ public class Hook implements IXposedHookLoadPackage {
 
     private static final class ExportSettings {
         final boolean panelEnabled;
-        final boolean saveToViaEnabled;
-        final boolean exportFileEnabled;
+        final boolean tabExportEnabled;
+        final boolean bookmarkImportEnabled;
 
-        ExportSettings(boolean panelEnabled, boolean saveToViaEnabled, boolean exportFileEnabled) {
+        ExportSettings(boolean panelEnabled, boolean tabExportEnabled, boolean bookmarkImportEnabled) {
             this.panelEnabled = panelEnabled;
-            this.saveToViaEnabled = saveToViaEnabled;
-            this.exportFileEnabled = exportFileEnabled;
+            this.tabExportEnabled = tabExportEnabled;
+            this.bookmarkImportEnabled = bookmarkImportEnabled;
         }
     }
 
@@ -1140,13 +1105,14 @@ public class Hook implements IXposedHookLoadPackage {
     private static void saveAndExportTabsNow(String folderName, List<TabRecord> tabs,
                                              Context uiContext, String source) {
         ExportSettings settings = readExportSettings();
-        if (!settings.saveToViaEnabled && !settings.exportFileEnabled) {
-            log("saved tabs skipped: saveToVia=false exportFile=false");
-            toast(uiContext, "\u8bf7\u5148\u5728\u6a21\u5757\u4e2d\u5f00\u542f\u4fdd\u5b58\u6216\u5bfc\u51fa");
+        if (!settings.tabExportEnabled && !settings.bookmarkImportEnabled) {
+            log("saved tabs skipped: tabExport=false bookmarkImport=false");
+            toast(uiContext, "请先在模块中开启标签导出或标签导入到书签");
             return;
         }
+
         BookmarkSaveResult result = new BookmarkSaveResult();
-        if (settings.saveToViaEnabled) {
+        if (settings.bookmarkImportEnabled) {
             try {
                 result = saveTabsToViaBookmarks(folderName, tabs);
             } catch (Throwable t) {
@@ -1154,16 +1120,20 @@ public class Hook implements IXposedHookLoadPackage {
                 log("save tabs to Via bookmarks failed, export will continue: " + t);
             }
         }
-        String exportPath = settings.exportFileEnabled
+
+        String exportPath = settings.tabExportEnabled
                 ? writeBookmarkSaveSnapshot(folderName, tabs, result, source)
                 : null;
+
         log("saved tabs export: source=" + source + " folder=" + folderName + " tabs=" + tabs.size()
-                + " saveToVia=" + settings.saveToViaEnabled + " exportFile=" + settings.exportFileEnabled
+                + " tabExport=" + settings.tabExportEnabled
+                + " bookmarkImport=" + settings.bookmarkImportEnabled
                 + " inserted=" + result.inserted + " skipped=" + result.skipped + " export=" + exportPath
                 + (result.error == null ? "" : " bookmarkError=" + result.error));
-        if (settings.saveToViaEnabled && !settings.exportFileEnabled) {
-            toast(uiContext, "已保存 " + result.inserted + " 个书签到 Via");
-        } else if (!settings.saveToViaEnabled && settings.exportFileEnabled) {
+
+        if (settings.bookmarkImportEnabled && !settings.tabExportEnabled) {
+            toast(uiContext, "已导入 " + result.inserted + " 个书签到 Via");
+        } else if (!settings.bookmarkImportEnabled && settings.tabExportEnabled) {
             if (exportPath == null || exportPath.length() == 0) {
                 toast(uiContext, "导出失败：未写入 Download/ViaTabsAgent");
             } else if (source != null && source.startsWith("cache.")) {
@@ -1174,9 +1144,9 @@ public class Hook implements IXposedHookLoadPackage {
         } else if (exportPath == null || exportPath.length() == 0) {
             toast(uiContext, "导出失败：未写入 Download/ViaTabsAgent");
         } else if (source != null && source.startsWith("cache.")) {
-            toast(uiContext, "已从缓存导出 " + tabs.size() + " 个标签到 Download/ViaTabsAgent");
+            toast(uiContext, "已导入 " + result.inserted + " 个书签，并从缓存导出到 Download/ViaTabsAgent");
         } else {
-            toast(uiContext, "已保存 " + result.inserted + " 个书签，已导出 " + tabs.size() + " 个标签");
+            toast(uiContext, "已导入 " + result.inserted + " 个书签，已导出 " + tabs.size() + " 个标签");
         }
     }
 
@@ -1613,7 +1583,7 @@ public class Hook implements IXposedHookLoadPackage {
             long now = System.currentTimeMillis();
             int bookmarkCount = countBookmarkableTabs(tabs);
             String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date(now));
-            String baseName = "\u4e66\u7b7e-" + stamp + "-" + bookmarkCount;
+            String baseName = "via-" + stamp + "-" + bookmarkCount;
             String htmlFileName = baseName + ".html";
             String htmlPath = writeJsonToDownloadsNow(htmlFileName, toNetscapeBookmarksHtml(folderName, tabs, now / 1000L));
             root.put("htmlExportPath", htmlPath == null ? JSONObject.NULL : "Download/ViaTabsAgent/" + htmlFileName);

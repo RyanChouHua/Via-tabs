@@ -41,8 +41,6 @@ ViaTabsAgent 是一个面向 Via 浏览器的 LSPosed/Xposed 模块，用于在 
 └── README.md
 ```
 
-`docs/`、`AGENTS.md`、`research/`、`tools/`、`out/` 为本地维护、研究、工具和构建产物目录，默认不上传 GitHub。
-
 ## 构建
 
 前置环境：
@@ -51,6 +49,7 @@ ViaTabsAgent 是一个面向 Via 浏览器的 LSPosed/Xposed 模块，用于在 
 - Android SDK
 - Android Gradle Plugin 7.2.2 可用缓存或网络
 - `xposed-api-82_compileonly.jar` 位于 `ViaTabsAgent/app/libs/compile_only/`
+- Gradle 7.4.2 或兼容版本
 
 构建命令：
 
@@ -59,22 +58,10 @@ cd ViaTabsAgent
 gradle assembleDebug
 ```
 
-当前本机常用命令：
-
-```powershell
-& "$env:USERPROFILE\.gradle\wrapper\dists\gradle-7.4.2-bin\48ivgl02cpt2ed3fh9dbalvx8\gradle-7.4.2\bin\gradle.bat" assembleDebug
-```
-
 输出：
 
 ```text
 ViaTabsAgent/app/build/outputs/apk/debug/app-debug.apk
-```
-
-发布给本地测试时可复制为：
-
-```text
-out/lsposed/ViaTabsAgent-LSPosed-debug.apk
 ```
 
 ## 使用
@@ -98,4 +85,4 @@ out/lsposed/ViaTabsAgent-LSPosed-debug.apk
 
 ## 说明
 
-本项目用于个人自动化和学习研究。不要提交第三方 APK、反编译产物、设备数据、浏览器书签或个人日志。
+本项目用于个人自动化和学习研究。仓库保留 `.gitignore`，用于避免误提交 APK、构建产物、日志、书签导出、反编译产物和本地工具。

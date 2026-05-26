@@ -31,7 +31,7 @@ tools/
 
 ## Android 模拟器资源
 
-当前本机发现：
+本轮已清理过的项目专用资源：
 
 ```text
 C:\Users\Ryan\.android\avd\ViaTabs_API33.avd
@@ -40,7 +40,7 @@ C:\A_Program\Env\android-sdk\system-images\android-33\google_apis\x86_64
 C:\A_Program\Env\android-sdk\system-images\android-35\google_apis\x86_64
 ```
 
-建议：
+后续建议：
 
 - 如果短期不再用模拟器测试，可删除两个 AVD。
 - 如果要保留一个，建议保留 API 35，删除 API 33。

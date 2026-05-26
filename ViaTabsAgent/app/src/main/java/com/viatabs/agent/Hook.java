@@ -3,6 +3,7 @@ package com.viatabs.agent;
 import android.app.Application;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -14,9 +15,11 @@ import android.database.sqlite.SQLiteDatabase;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Parcelable;
+import android.provider.MediaStore;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
@@ -34,6 +37,7 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -688,10 +692,11 @@ public class Hook implements IXposedHookLoadPackage {
                         public void run() {
                             try {
                                 BookmarkSaveResult result = saveTabsToViaBookmarks(folderName, tabs);
-                                writeBookmarkSaveSnapshot(folderName, tabs, result);
+                                String exportPath = writeBookmarkSaveSnapshot(folderName, tabs, result);
                                 log("saved tabs to bookmarks: folder=" + folderName + " tabs=" + tabs.size()
-                                        + " inserted=" + result.inserted + " skipped=" + result.skipped);
-                                toast(uiContext, "已保存 " + result.inserted + " 个标签，跳过 " + result.skipped + " 个");
+                                        + " inserted=" + result.inserted + " skipped=" + result.skipped
+                                        + " export=" + exportPath);
+                                toast(uiContext, "已保存 " + result.inserted + " 个标签，已导出到 Download/ViaTabsAgent");
                             } catch (Throwable t) {
                                 log("saveCurrentTabsToBookmarks background failed: " + t);
                                 toast(uiContext, "保存失败：" + shortError(t));
@@ -949,7 +954,7 @@ public class Hook implements IXposedHookLoadPackage {
         return -1;
     }
 
-    private static void writeBookmarkSaveSnapshot(String folderName, List<TabRecord> tabs, BookmarkSaveResult result) {
+    private static String writeBookmarkSaveSnapshot(String folderName, List<TabRecord> tabs, BookmarkSaveResult result) {
         try {
             JSONObject root = baseSnapshot("bookmarks.saveTabs");
             root.put("folder", folderName);
@@ -957,9 +962,11 @@ public class Hook implements IXposedHookLoadPackage {
             root.put("inserted", result.inserted);
             root.put("skipped", result.skipped);
             root.put("tabs", toTabRecordArray(tabs));
-            writeJsonToFileNow(new File(agentDir(), "saved-bookmarks.json"), root.toString(2));
+            root.put("exportPath", "Download/ViaTabsAgent/saved-bookmarks.json");
+            return writeJsonToDownloadsNow("saved-bookmarks.json", root.toString(2));
         } catch (Throwable t) {
             log("write bookmark save snapshot failed: " + t);
+            return null;
         }
     }
 
@@ -1525,6 +1532,76 @@ public class Hook implements IXposedHookLoadPackage {
                 }
             }
         }
+    }
+
+    private static String writeJsonToDownloadsNow(String fileName, String payload) {
+        if (appContext == null) {
+            return null;
+        }
+        if (Build.VERSION.SDK_INT >= 29) {
+            return writeJsonToDownloadsWithMediaStore(fileName, payload);
+        }
+        return writeJsonToLegacyDownloads(fileName, payload);
+    }
+
+    private static String writeJsonToDownloadsWithMediaStore(String fileName, String payload) {
+        String relativePath = Environment.DIRECTORY_DOWNLOADS + "/ViaTabsAgent/";
+        Uri uri = null;
+        ContentResolver resolver = appContext.getContentResolver();
+        Cursor cursor = null;
+        try {
+            Uri collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
+            cursor = resolver.query(collection, new String[]{MediaStore.Downloads._ID},
+                    MediaStore.Downloads.DISPLAY_NAME + "=? AND " + MediaStore.Downloads.RELATIVE_PATH + "=?",
+                    new String[]{fileName, relativePath}, null);
+            if (cursor != null && cursor.moveToFirst()) {
+                long id = cursor.getLong(0);
+                uri = Uri.withAppendedPath(collection, String.valueOf(id));
+            }
+            if (uri == null) {
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.Downloads.DISPLAY_NAME, fileName);
+                values.put(MediaStore.Downloads.MIME_TYPE, "application/json");
+                values.put(MediaStore.Downloads.RELATIVE_PATH, relativePath);
+                values.put(MediaStore.Downloads.IS_PENDING, 1);
+                uri = resolver.insert(collection, values);
+            }
+            if (uri == null) {
+                throw new IllegalStateException("cannot create Download export");
+            }
+            OutputStream stream = resolver.openOutputStream(uri, "wt");
+            if (stream == null) {
+                throw new IllegalStateException("cannot open Download export");
+            }
+            try {
+                stream.write(payload.getBytes(StandardCharsets.UTF_8));
+            } finally {
+                stream.close();
+            }
+            ContentValues done = new ContentValues();
+            done.put(MediaStore.Downloads.IS_PENDING, 0);
+            resolver.update(uri, done, null, null);
+            String path = "Download/ViaTabsAgent/" + fileName;
+            log("wrote " + path);
+            return path;
+        } catch (Throwable t) {
+            log("write Download via MediaStore failed: " + t);
+            return writeJsonToLegacyDownloads(fileName, payload);
+        } finally {
+            if (cursor != null) {
+                cursor.close();
+            }
+        }
+    }
+
+    private static String writeJsonToLegacyDownloads(String fileName, String payload) {
+        File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "ViaTabsAgent");
+        if (!dir.exists() && !dir.mkdirs()) {
+            throw new IllegalStateException("cannot create " + dir);
+        }
+        File out = new File(dir, fileName);
+        writeJsonToFileNow(out, payload);
+        return out.getAbsolutePath();
     }
 
     private static boolean isTabManagerSource(String source) {

@@ -10,6 +10,8 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -21,7 +23,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.WebView;
-import android.widget.LinearLayout;
+import android.widget.FrameLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -74,7 +76,6 @@ public class Hook implements IXposedHookLoadPackage {
     private static volatile Method switchTabMethod;
     private static volatile Method sessionBundleMethod;
     private static final WeakHashMap<Activity, View> PANEL_BUTTONS = new WeakHashMap<Activity, View>();
-    private static final WeakHashMap<Activity, Integer> PANEL_INSTALL_RETRIES = new WeakHashMap<Activity, Integer>();
     private static final ExecutorService WRITER = Executors.newSingleThreadExecutor();
     private static final ThreadLocal<Boolean> IN_MANAGER_SNAPSHOT = new ThreadLocal<Boolean>();
     private static final ThreadLocal<Boolean> IN_WEBVIEW_CAPTURE = new ThreadLocal<Boolean>();
@@ -308,8 +309,7 @@ public class Hook implements IXposedHookLoadPackage {
         final ExportSettings settings = readExportSettings();
         if (!settings.panelEnabled) {
             removePanelButton(activity);
-            PANEL_INSTALL_RETRIES.remove(activity);
-            log("toolbar entry hidden: panel disabled");
+            log("bookmark button hidden: panel disabled");
             return;
         }
         if (PANEL_BUTTONS.containsKey(activity)) {
@@ -319,30 +319,25 @@ public class Hook implements IXposedHookLoadPackage {
         if (content == null) {
             return;
         }
-        ViewGroup toolbar = findToolbarContainer(content);
-        if (toolbar == null) {
-            scheduleToolbarInstallRetry(activity, content);
-            return;
-        }
-        PANEL_INSTALL_RETRIES.remove(activity);
         final TextView button = new TextView(activity);
         button.setText("\u4e66\u7b7e");
         button.setTextColor(0xffffffff);
-        button.setTextSize(12f);
+        button.setTextSize(13f);
         button.setGravity(Gravity.CENTER);
-        button.setBackgroundColor(0x00000000);
-        button.setPadding(dp(activity, 10), dp(activity, 8), dp(activity, 10), dp(activity, 8));
-        LinearLayout.LayoutParams linearParams = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.MATCH_PARENT);
-        linearParams.gravity = Gravity.CENTER_VERTICAL;
-        linearParams.leftMargin = dp(activity, 4);
-        linearParams.rightMargin = dp(activity, 4);
-        ViewGroup.LayoutParams params = toolbar instanceof LinearLayout
-                ? linearParams
-                : new ViewGroup.LayoutParams(dp(activity, 58), dp(activity, 42));
+        button.setSingleLine(true);
+        button.setPadding(dp(activity, 14), 0, dp(activity, 14), 0);
+        button.setMinWidth(dp(activity, 68));
+        button.setMinHeight(dp(activity, 44));
+        button.setBackground(makeButtonBackground(activity));
+        if (Build.VERSION.SDK_INT >= 21) {
+            button.setElevation(dp(activity, 6));
+            button.setTranslationZ(dp(activity, 2));
+        }
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(dp(activity, 76), dp(activity, 44));
+        params.gravity = Gravity.RIGHT | Gravity.CENTER_VERTICAL;
+        params.rightMargin = dp(activity, 10);
         try {
-            toolbar.addView(button, params);
+            content.addView(button, params);
             PANEL_BUTTONS.put(activity, button);
             button.setOnClickListener(new View.OnClickListener() {
                 @Override
@@ -350,109 +345,29 @@ public class Hook implements IXposedHookLoadPackage {
                     ExportSettings current = readExportSettings();
                     if (!current.panelEnabled) {
                         toast(activity, "\u4e66\u7b7e\u5165\u53e3\u5df2\u5173\u95ed");
-                        log("toolbar export ignored: panel disabled");
+                        log("bookmark button ignored: panel disabled");
                         removePanelButton(activity);
                         return;
                     }
                     if (!current.saveToViaEnabled && !current.exportFileEnabled) {
                         toast(activity, "\u8bf7\u5148\u5728\u6a21\u5757\u4e2d\u5f00\u542f\u4fdd\u5b58\u6216\u5bfc\u51fa");
-                        log("toolbar export ignored: all actions disabled");
+                        log("bookmark button ignored: all actions disabled");
                         return;
                     }
-                    log("toolbar bookmark clicked");
+                    log("bookmark button clicked");
                     saveCurrentTabsToBookmarks("\u4e66\u7b7e", activity);
                     toast(activity, "\u6b63\u5728\u5904\u7406\u4e66\u7b7e");
                 }
             });
-            log("installed bookmark entry into Via toolbar: " + toolbar.getClass().getName());
+            log("installed styled bookmark button");
         } catch (Throwable t) {
-            log("install toolbar entry failed: " + t);
+            log("install bookmark button failed: " + t);
         }
-    }
-
-    private static void scheduleToolbarInstallRetry(final Activity activity, ViewGroup content) {
-        Integer oldCount = PANEL_INSTALL_RETRIES.get(activity);
-        final int count = oldCount == null ? 0 : oldCount;
-        if (count >= 5) {
-            log("toolbar entry skipped: no Via toolbar container found after retry");
-            return;
-        }
-        PANEL_INSTALL_RETRIES.put(activity, count + 1);
-        content.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                maybeInstallPanelButton(activity);
-            }
-        }, 600L);
-    }
-
-    private static ViewGroup findToolbarContainer(View view) {
-        ToolbarCandidate best = findToolbarCandidate(view, null, 0);
-        return best == null ? null : best.view;
-    }
-
-    private static ToolbarCandidate findToolbarCandidate(View view, ToolbarCandidate best, int depth) {
-        if (!(view instanceof ViewGroup) || depth > 12) {
-            return best;
-        }
-        ViewGroup group = (ViewGroup) view;
-        ToolbarCandidate candidate = scoreToolbarCandidate(group, depth);
-        if (candidate != null && (best == null || candidate.score > best.score)) {
-            best = candidate;
-        }
-        for (int i = 0; i < group.getChildCount(); i++) {
-            best = findToolbarCandidate(group.getChildAt(i), best, depth + 1);
-        }
-        return best;
-    }
-
-    private static ToolbarCandidate scoreToolbarCandidate(ViewGroup group, int depth) {
-        if (group.getVisibility() != View.VISIBLE || group.getChildCount() < 2 || containsWebView(group)) {
-            return null;
-        }
-        int score = 0;
-        if (group instanceof LinearLayout
-                && ((LinearLayout) group).getOrientation() == LinearLayout.HORIZONTAL) {
-            score += 40;
-        }
-        int height = group.getHeight();
-        if (height > 0 && height <= dp(group.getContext(), 80)) {
-            score += 25;
-        }
-        int width = group.getWidth();
-        if (width > 0 && width >= dp(group.getContext(), 160)) {
-            score += 10;
-        }
-        if (group.isShown()) {
-            score += 10;
-        }
-        score += Math.max(0, 12 - depth);
-        if (score < 45) {
-            return null;
-        }
-        return new ToolbarCandidate(group, score);
-    }
-
-    private static boolean containsWebView(View view) {
-        if (view instanceof WebView) {
-            return true;
-        }
-        if (!(view instanceof ViewGroup)) {
-            return false;
-        }
-        ViewGroup group = (ViewGroup) view;
-        for (int i = 0; i < group.getChildCount(); i++) {
-            if (containsWebView(group.getChildAt(i))) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private static void removePanelButton(Activity activity) {
         try {
             View button = PANEL_BUTTONS.remove(activity);
-            PANEL_INSTALL_RETRIES.remove(activity);
             if (button == null) {
                 return;
             }
@@ -463,6 +378,24 @@ public class Hook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             log("remove panel button failed: " + t);
         }
+    }
+
+    private static StateListDrawable makeButtonBackground(Context context) {
+        StateListDrawable states = new StateListDrawable();
+        states.addState(new int[]{android.R.attr.state_pressed},
+                roundedRect(context, 0xee185abc, 0xffdbeafe));
+        states.addState(new int[]{},
+                roundedRect(context, 0xee2563eb, 0xffffffff));
+        return states;
+    }
+
+    private static GradientDrawable roundedRect(Context context, int fillColor, int strokeColor) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setShape(GradientDrawable.RECTANGLE);
+        drawable.setColor(fillColor);
+        drawable.setCornerRadius(dp(context, 22));
+        drawable.setStroke(dp(context, 1), strokeColor);
+        return drawable;
     }
 
     private static boolean isExportEnabled() {
@@ -489,16 +422,6 @@ public class Hook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             log("read export settings failed, default enabled: " + t);
             return new ExportSettings(true, true, true);
-        }
-    }
-
-    private static final class ToolbarCandidate {
-        final ViewGroup view;
-        final int score;
-
-        ToolbarCandidate(ViewGroup view, int score) {
-            this.view = view;
-            this.score = score;
         }
     }
 

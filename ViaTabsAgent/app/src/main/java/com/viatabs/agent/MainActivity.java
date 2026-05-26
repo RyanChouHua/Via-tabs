@@ -36,7 +36,7 @@ public class MainActivity extends Activity {
 
         TextView info = new TextView(this);
         info.setText("LSPosed 模块安装后，请在 LSPosed 中启用并勾选 mark.via / mark.via.gp。\n"
-                + "Via 内会尝试把“书签”入口嵌入现有工具栏，导出目录：/storage/emulated/0/Download/ViaTabsAgent/\n"
+                + "Via 内显示“书签”按钮，导出目录：/storage/emulated/0/Download/ViaTabsAgent/\n"
                 + "书签文件名：书签-日期-数量.html / 书签-日期-数量.json\n"
                 + "日志文件：/storage/emulated/0/Download/ViaTabsAgent/agent-log.txt");
         info.setTextSize(14f);

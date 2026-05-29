@@ -11,18 +11,9 @@ out/
 *.class
 local.properties
 
-# Published APK artifacts
-!release/
-!release/*.apk
-
-# Reverse-engineering outputs and third-party clones
+# Reverse-engineering outputs and local tool binaries
 research/
-docs/
-AGENTS.md
-
-# Tool binaries kept locally
-tools/adb/
-tools/lspatch/*.jar
+tools/
 
 # Local captures and temporary outputs
 *.png

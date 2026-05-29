@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ViaTabs Root Helper</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>ViaTabs Root Helper</h1>
+      <p>使用 root 提取 Via 数据库，App 负责解析和管理标签。</p>
+    </header>
+
+    <section class="actions">
+      <button id="run">立即提取</button>
+      <button id="status">刷新状态</button>
+      <button id="log">查看日志</button>
+      <button id="clear">清空日志</button>
+    </section>
+
+    <section>
+      <h2>状态</h2>
+      <pre id="output">等待操作...</pre>
+    </section>
+
+    <section>
+      <h2>路径</h2>
+      <p>输出数据库写入 ViaTabsAgent 私有目录。</p>
+      <code>/data/user/0/com.viatabs.agent/files/offline-via-tabs/</code>
+    </section>
+  </main>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

@@ -1,6 +1,0 @@
-<resources>
-    <string-array name="xposed_scope">
-        <item>mark.via</item>
-        <item>mark.via.gp</item>
-    </string-array>
-</resources>

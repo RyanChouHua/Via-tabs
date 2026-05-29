@@ -1,63 +1,103 @@
 # ViaTabsAgent
 
-ViaTabsAgent 是一个面向 Via 浏览器的 LSPosed/Xposed 模块，用于在 Via 内读取当前已加载标签页，并将标签导出为书签文件或直接写入 Via 书签。
+ViaTabsAgent 是一个面向 Via 浏览器的本地标签备份工具。
 
-当前适配目标：
+当前主线是 **终端 root sh 提取 Via 数据库，App 离线解析、管理和导出标签**。不再依赖 LSPosed/Xposed/Hook，也不再使用 Magisk/KSU 模块作为默认路径。
+
+## 目标
 
 - `mark.via`
 - `mark.via.gp`
-- LSPosed 2.0.2 及以上版本
+
+## 核心流程
+
+1. 在 App 中点 `保存脚本`，生成：
+
+```text
+/storage/emulated/0/Download/ViaTabsAgent/prepare-via-all-db.sh
+```
+
+2. 在手机终端执行：
+
+```sh
+su
+sh /storage/emulated/0/Download/ViaTabsAgent/prepare-via-all-db.sh
+```
+
+3. 脚本会分别尝试提取国内版和 GP 版 Via 数据库：
+
+```text
+/data/user/0/com.viatabs.agent/files/offline-via-tabs/mark_via-via.db
+/data/user/0/com.viatabs.agent/files/offline-via-tabs/mark_via_gp-via.db
+```
+
+4. 回到 App，点 `解析数据库`。
+5. 在 `备份管理` 中按备份批次、国内版/GP 版分开管理标签。
+6. 用 `导出书签` 生成 Via 可手动导入的 Netscape Bookmark HTML。
 
 ## 功能
 
-- Via 内悬浮圆形按钮，支持拖动并按 Via 包名保存位置。
-- 点击悬浮按钮后预览当前可保存标签数量，再确认保存。
-- 默认导出 JSON 标签数据。
-- 可导出 Netscape Bookmark HTML，便于书签导入。
-- 可直接导入到 Via 书签数据库。
-- 可按域名整理书签，常见二级后缀和移动端前缀会被归并。
-- App 内提供功能开关、按钮样式设置、日志、最近结果和本地导出数据管理。
-- 本地导出数据管理支持按来源包名、备注、时间排序、批量备注、批量删除和批量导入。
+- 保存并提示执行 root sh 提取脚本。
+- 解析 Via 数据库中可恢复标签。
+- 本地 SQLite 管理备份和标签。
+- 按备份批次、来源版本、域名、搜索词筛选。
+- 支持标题/备注编辑、删除/恢复、永久清理。
+- 支持按域名整理导出书签 HTML。
+- 日志写入 App 私有文件，并导出到：
 
-## 当前限制
+```text
+/storage/emulated/0/Download/ViaTabsAgent/agent-log.txt
+```
 
-- 只能稳定保存已经实际加载进 WebView 的标签页。
-- Via 启动恢复但尚未手动点开的标签，当前不能保证完整读取。
-- “渐进打开恢复标签”路线已暂停，避免大量标签自动加载带来的崩溃和流量风险。
-- 书签导入依赖 Via 当前版本内部数据库结构，Via 升级后可能需要重新适配。
-- 0.4.9 中书签导入后的 Via 书签页刷新仍不稳定，可能需要重启 Via 才能显示。
-- 0.4.9 中“清空已加载可保存标签”功能仍未可靠生效。
+## 当前版本
+
+当前源码已经提交为 sh-only 基线：
+
+```text
+versionCode 52
+versionName 0.5.7-pure-app-no-tag-source
+git tag v0.5.7-sh-only
+```
+
+注意：本仓库历史里没有原始 `0.5.7` Git tag，只有备份目录中的 APK。`v0.5.7-sh-only` 是根据该 APK 元数据和当前 sh-only 路线整理出的可回退基线。
 
 ## 项目结构
 
 ```text
 .
-├── ViaTabsAgent/                 # Android LSPosed 模块源码
-│   ├── app/src/main/java/com/viatabs/agent/
-│   │   ├── Hook.java             # Via 进程 Hook 与标签捕获/书签写入
-│   │   ├── MainActivity.java     # 模块 App 设置与本地管理界面
-│   │   ├── AgentStore.java       # 配置、日志、导出文件管理
-│   │   ├── ExportProvider.java   # 模块与 Via 进程之间的 ContentProvider 通道
-│   │   └── ExportReceiver.java
-│   └── app/src/main/assets/xposed_init
+├── ViaTabsAgent/
+│   └── app/src/main/
+│       ├── assets/prepare-via-all-db.sh
+│       └── java/com/viatabs/agent/
+│           ├── MainActivity.java
+│           ├── AgentStore.java
+│           ├── OfflineViaTabsReader.java
+│           ├── LocalTabStore.java
+│           ├── ManagedBackup.java
+│           ├── ManagedTab.java
+│           ├── BookmarkHtml.java
+│           └── ...
+├── docs/
+│   ├── maintenance.md
+│   ├── cleanup.md
+│   └── archive/
+│       ├── magisk-root-helper/
+│       └── xposed-lsposed-research/
+├── AGENTS.md
 └── README.md
 ```
 
 ## 构建
 
-前置环境：
-
-- JDK 17
-- Android SDK
-- Android Gradle Plugin 7.2.2 可用缓存或网络
-- `xposed-api-82_compileonly.jar` 位于 `ViaTabsAgent/app/libs/compile_only/`
-- Gradle 7.4.2 或兼容版本
-
-构建命令：
-
 ```powershell
 cd ViaTabsAgent
 gradle assembleDebug
+```
+
+本机可用：
+
+```powershell
+& "$env:USERPROFILE\.gradle\wrapper\dists\gradle-7.4.2-bin\48ivgl02cpt2ed3fh9dbalvx8\gradle-7.4.2\bin\gradle.bat" assembleDebug
 ```
 
 输出：
@@ -66,33 +106,15 @@ gradle assembleDebug
 ViaTabsAgent/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## 下载
+## 归档路线
 
-仓库内保留当前调试构建产物：
+- Magisk/KSU/APatch root helper 已归档到 `docs/archive/magisk-root-helper/`。
+- LSPosed/Xposed/Hook 研究资料已归档到 `docs/archive/xposed-lsposed-research/`。
+- 当前主线不从这些归档路线继续开发，除非明确重新评估。
 
-```text
-release/ViaTabsAgent-LSPosed-0.4.9-lsposed-ui-debug.apk
-```
+## 不提交内容
 
-## 使用
-
-1. 安装构建出的 APK。
-2. 在 LSPosed 中启用 ViaTabsAgent，并勾选 `mark.via` 或 `mark.via.gp`。
-3. 强制停止目标 Via 后重新打开。
-4. 在 Via 页面右侧看到悬浮圆形按钮后，点击读取当前标签并确认保存。
-5. 导出文件位于手机：
-
-```text
-/storage/emulated/0/Download/ViaTabsAgent/
-```
-
-## 后续方向
-
-- 深入分析 Via 恢复标签的持久化结构，寻找“不打开页面也能读取全部恢复标签”的路径。
-- 增强不同 Via 版本的兼容性检测。
-- 给本地导出管理增加更清晰的批量操作反馈。
-- 抽离 Hook 规则和书签数据库写入逻辑，降低 Via 升级后的维护成本。
-
-## 说明
-
-本项目用于个人自动化和学习研究。仓库保留 `.gitignore`，用于避免误提交 APK、构建产物、日志、书签导出、反编译产物和本地工具。
+- APK/AAB/构建产物。
+- `out/`、`research/`、`tools/`。
+- 第三方 APK、反编译产物、设备隐私数据。
+- 手机导出的 JSON/HTML、日志和截图。

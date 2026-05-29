@@ -6,12 +6,12 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.DialogInterface;
-import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
+import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
@@ -19,16 +19,15 @@ import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
-import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -44,22 +43,40 @@ public class MainActivity extends Activity {
     private static final int COLOR_PRIMARY = Color.rgb(37, 99, 235);
     private static final int COLOR_PRIMARY_DARK = Color.rgb(30, 64, 175);
     private static final int COLOR_DANGER = Color.rgb(220, 38, 38);
-    private static final int COLOR_LOG_BG = Color.rgb(15, 23, 42);
-    private static final String FILTER_ALL = "all";
-    private static final String FILTER_NOTE = "note";
-    private static final String FILTER_NONE = "none";
+    private static final int COLOR_SUCCESS = Color.rgb(22, 101, 52);
+    private static final String SOURCE_ALL = "";
+    private static final String DOMAIN_ALL = "";
+    private static final int BACKUP_PAGE_SIZE = 30;
+    private static final int TAG_PAGE_SIZE = 60;
 
     private TextView statusView;
-    private CheckBox exportSwitch;
-    private CheckBox bookmarkImportSwitch;
     private CheckBox domainGroupSwitch;
-    private TextView panelStyleSummary;
-    private TextView panelStyleButton;
+    private LocalTabStore tabStore;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        tabStore = new LocalTabStore(this);
+        setContentView(buildContent());
+        AgentStore.appendLog(this, "app opened");
+        refreshStatus();
+    }
 
+    @Override
+    protected void onResume() {
+        super.onResume();
+        refreshStatus();
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (tabStore != null) {
+            tabStore.close();
+        }
+        super.onDestroy();
+    }
+
+    private View buildContent() {
         ScrollView page = new ScrollView(this);
         page.setFillViewport(false);
         page.setBackgroundColor(COLOR_BG);
@@ -75,7 +92,7 @@ public class MainActivity extends Activity {
         root.addView(title, matchWrap());
 
         TextView subtitle = textView(13f, COLOR_MUTED, false);
-        subtitle.setText("Via 标签导出与书签导入模块");
+        subtitle.setText("终端脚本提取 Via 数据库，应用本地解析和管理标签");
         subtitle.setPadding(0, dp(4), 0, dp(14));
         root.addView(subtitle, matchWrap());
 
@@ -84,498 +101,215 @@ public class MainActivity extends Activity {
         statusView.setBackground(panelBackground(8, COLOR_PANEL, COLOR_BORDER));
         root.addView(statusView, margin(matchWrap(), 0, 0, 0, dp(12)));
 
-        LinearLayout switchPanel = panel();
-        addSectionTitle(switchPanel, "功能开关");
-        exportSwitch = switchView("启用 Via 内悬浮按钮");
-        bookmarkImportSwitch = switchView("标签导入到书签");
-        domainGroupSwitch = switchView("按域名整理书签");
-        switchPanel.addView(exportSwitch, matchWrap());
-        switchPanel.addView(bookmarkImportSwitch, matchWrap());
-        switchPanel.addView(domainGroupSwitch, matchWrap());
-        addPanelColorChooser(switchPanel);
-        root.addView(switchPanel, margin(matchWrap(), 0, 0, 0, dp(12)));
-
-        bindSwitches();
-
-        LinearLayout actionPanel = panel();
-        addSectionTitle(actionPanel, "操作");
-        Button testExport = actionButton("测试导出", COLOR_PRIMARY_DARK, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                runTestExport();
-            }
-        });
-        actionPanel.addView(testExport, matchWrap());
-        Button manager = actionButton("本地导出数据管理", COLOR_PRIMARY_DARK, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                showExportManagerDialog();
-            }
-        });
-        actionPanel.addView(manager, margin(matchWrap(), 0, dp(8), 0, 0));
-        root.addView(actionPanel, margin(matchWrap(), 0, 0, 0, dp(12)));
-
-        LinearLayout detailPanel = panel();
-        addSectionTitle(detailPanel, "查看与管理");
-        addButtonGrid(detailPanel,
-                detailButton("信息", new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        showTextDialog("信息", buildInfoText(), false);
-                    }
-                }),
-                detailButton("说明", new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        showTextDialog("说明", buildHelpText(), false);
-                    }
-                }));
-        addButtonGrid(detailPanel,
-                detailButton("结果", new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        String result = formatLastResult(AgentStore.getLastSaveResult(MainActivity.this));
-                        showTextDialog("结果", result.length() == 0 ? "暂无最近一次保存结果。" : result, true);
-                    }
-                }),
-                detailButton("日志", new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        showTextDialog("日志", buildLogText(), true);
-                    }
-                }));
-        root.addView(detailPanel, margin(matchWrap(), 0, 0, 0, dp(12)));
-
-        setContentView(page);
-        AgentStore.appendLog(this, "打开模块界面");
-        refreshStatus();
+        root.addView(settingsPanel(), margin(matchWrap(), 0, 0, 0, dp(12)));
+        root.addView(actionPanel(), margin(matchWrap(), 0, 0, 0, dp(12)));
+        root.addView(helpPanel(), margin(matchWrap(), 0, 0, 0, dp(12)));
+        return page;
     }
 
-    @Override
-    protected void onResume() {
-        super.onResume();
-        refreshStatus();
-    }
-
-    private void bindSwitches() {
-        exportSwitch.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                boolean enabled = exportSwitch.isChecked();
-                AgentStore.setExportEnabled(MainActivity.this, enabled);
-                AgentStore.appendLog(MainActivity.this, "导出开关: " + (enabled ? "开启" : "关闭"));
-                refreshStatus();
-            }
-        });
-        bookmarkImportSwitch.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                boolean enabled = bookmarkImportSwitch.isChecked();
-                AgentStore.setBookmarkImportEnabled(MainActivity.this, enabled);
-                AgentStore.appendLog(MainActivity.this, "标签导入到书签: " + (enabled ? "开启" : "关闭"));
-                refreshStatus();
-            }
-        });
+    private LinearLayout settingsPanel() {
+        LinearLayout panel = panel();
+        addSectionTitle(panel, "设置");
+        domainGroupSwitch = switchView("导出书签文件时按域名整理");
+        domainGroupSwitch.setChecked(AgentStore.isDomainGroupEnabled(this));
         domainGroupSwitch.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 boolean enabled = domainGroupSwitch.isChecked();
                 AgentStore.setDomainGroupEnabled(MainActivity.this, enabled);
-                AgentStore.appendLog(MainActivity.this, "按域名整理: " + (enabled ? "开启" : "关闭"));
+                AgentStore.appendLog(MainActivity.this, "domain grouping " + (enabled ? "enabled" : "disabled"));
                 refreshStatus();
             }
         });
+        panel.addView(domainGroupSwitch, matchWrap());
+        return panel;
+    }
+
+    private LinearLayout actionPanel() {
+        LinearLayout panel = panel();
+        addSectionTitle(panel, "操作");
+        panel.addView(actionButton("保存脚本", COLOR_PRIMARY_DARK, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                savePrepareScript();
+            }
+        }), matchWrap());
+        panel.addView(actionButton("解析数据库", COLOR_PRIMARY, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                parsePreparedDatabases();
+            }
+        }), margin(matchWrap(), 0, dp(8), 0, 0));
+        panel.addView(actionButton("备份管理", COLOR_PRIMARY, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showBackupsDialog();
+            }
+        }), margin(matchWrap(), 0, dp(8), 0, 0));
+        panel.addView(actionButton("导出书签", COLOR_SUCCESS, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                exportHtmlFromStore();
+            }
+        }), margin(matchWrap(), 0, dp(8), 0, 0));
+        panel.addView(actionButton("日志", COLOR_PRIMARY_DARK, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showLogDialog();
+            }
+        }), margin(matchWrap(), 0, dp(8), 0, 0));
+        return panel;
+    }
+
+    private LinearLayout helpPanel() {
+        LinearLayout panel = panel();
+        addSectionTitle(panel, "流程");
+        TextView text = textView(13f, COLOR_MUTED, false);
+        text.setText("1. 打开本应用一次。\n"
+                + "2. 点保存脚本，在手机终端中用 root 执行 prepare-via-all-db.sh。\n"
+                + "3. 提取完成后回到应用，点解析数据库。\n"
+                + "4. 在备份管理里按国内版/GP 分开管理，导出书签生成 Via 可导入文件。");
+        panel.addView(text, matchWrap());
+        return panel;
     }
 
     private void refreshStatus() {
-        boolean enabled = AgentStore.isExportEnabled(this);
-        boolean bookmarkImport = AgentStore.isBookmarkImportEnabled(this);
-        boolean domainGroup = AgentStore.isDomainGroupEnabled(this);
-        exportSwitch.setChecked(enabled);
-        bookmarkImportSwitch.setChecked(bookmarkImport);
-        domainGroupSwitch.setChecked(domainGroup);
-        if (panelStyleSummary != null) {
-            panelStyleSummary.setText(panelStyleSummaryText());
+        if (statusView == null) {
+            return;
         }
-        if (panelStyleButton != null) {
-            panelStyleButton.setBackground(stylePreviewBackground(AgentStore.getPanelColor(this), true));
-            panelStyleButton.setText("✔");
-            panelStyleButton.setTextColor(previewTextColor(AgentStore.getPanelColor(this)));
-        }
-        statusView.setText(buildStatusSummary(enabled, bookmarkImport, domainGroup));
+        LocalTabStore.Stats stats = tabStore.stats();
+        statusView.setText("ViaTabsAgent " + BuildConfig.VERSION_NAME + "  #" + BuildConfig.VERSION_CODE + "\n"
+                + "国内版: " + installedText("mark.via")
+                + "   GP版: " + installedText("mark.via.gp") + "\n"
+                + "已提取数据库: 国内版 " + preparedText("mark.via")
+                + " / GP版 " + preparedText("mark.via.gp") + "\n"
+                + "备份: 可用 " + stats.activeBackups + " / 已删 " + stats.deletedBackups
+                + " / 总数 " + stats.backups + "\n"
+                + "标签: 可用 " + stats.active + " / 已删 " + stats.deleted
+                + " / 总数 " + stats.total);
     }
 
-    private String buildStatusSummary(boolean enabled, boolean bookmarkImport, boolean domainGroup) {
-        StringBuilder status = new StringBuilder();
-        status.append("ViaTabsAgent ").append(BuildConfig.VERSION_NAME)
-                .append("  #").append(BuildConfig.VERSION_CODE).append("\n");
-        status.append("国内版 ").append(isPackageInstalled("mark.via") ? "已安装" : "未安装")
-                .append("   GP版 ").append(isPackageInstalled("mark.via.gp") ? "已安装" : "未安装")
-                .append("\n");
-        status.append("悬浮按钮 ").append(enabled ? "开启" : "关闭")
-                .append("   导入 ").append(bookmarkImport ? "开启" : "关闭")
-                .append("   整理 ").append(domainGroup ? "开启" : "关闭")
-                .append("\n");
-        status.append("圆点 ")
-                .append(colorLabel(AgentStore.getPanelColor(this)))
-                .append(" / ").append(AgentStore.getPanelSize(this)).append("dp")
-                .append(" / ").append(AgentStore.getPanelAlpha(this)).append("%");
-        return status.toString();
-    }
-
-    private String buildInfoText() {
-        return "模块版本: " + BuildConfig.VERSION_NAME + " (" + BuildConfig.VERSION_CODE + ")\n"
-                + "mark.via: " + (isPackageInstalled("mark.via") ? "已安装" : "未安装") + "\n"
-                + "mark.via.gp: " + (isPackageInstalled("mark.via.gp") ? "已安装" : "未安装") + "\n"
-                + "Via 内按钮: " + (AgentStore.isExportEnabled(this) ? "开启" : "关闭") + "\n"
-                + "JSON 标签文件: 默认保存\n"
-                + "标签导入到书签: " + (AgentStore.isBookmarkImportEnabled(this) ? "开启" : "关闭") + "\n"
-                + "按域名整理: " + (AgentStore.isDomainGroupEnabled(this) ? "开启" : "关闭") + "\n"
-                + "悬浮按钮配色: " + colorLabel(AgentStore.getPanelColor(this)) + "\n"
-                + "悬浮按钮大小: " + AgentStore.getPanelSize(this) + "dp\n"
-                + "透明度: " + AgentStore.getPanelAlpha(this) + "%";
-    }
-
-    private String buildHelpText() {
-        return "使用说明:\n"
-                + "1. 在 LSPosed 中启用 ViaTabsAgent，并勾选 mark.via / mark.via.gp。\n"
-                + "2. 强制停止 Via 后重新打开。\n"
-                + "3. Via 内悬浮按钮为纯色圆点，点击后读取当前标签并弹出确认。\n"
-                + "4. 长按拖动悬浮按钮，位置会按 mark.via / mark.via.gp 分开保存。\n"
-                + "5. 本地导出数据管理会把同名 HTML/JSON 合并成一组，可备注、筛选、批量备注、批量删除或导入。\n\n"
-                + "导出目录:\n/storage/emulated/0/Download/ViaTabsAgent/";
-    }
-
-    private String formatLastResult(String payload) {
-        if (payload == null || payload.trim().length() == 0) {
-            return "";
-        }
+    private void savePrepareScript() {
         try {
-            JSONObject root = new JSONObject(payload);
-            StringBuilder result = new StringBuilder();
-            result.append("时间: ").append(root.optString("time", "-")).append("\n");
-            result.append("来源: ").append(root.optString("source", "-")).append("\n");
-            result.append("目标: ").append(root.optString("targetPackage", "-")).append("\n");
-            result.append("文件夹: ").append(root.optString("folder", "-")).append("\n");
-            result.append("捕获/可保存: ").append(root.optInt("captured", 0))
-                    .append("/").append(root.optInt("bookmarkable", 0)).append("\n");
-            result.append("导入/跳过: ").append(root.optInt("inserted", 0))
-                    .append("/").append(root.optInt("skipped", 0)).append("\n");
-            result.append("按域名整理: ").append(root.optBoolean("domainGroup", false) ? "开启" : "关闭").append("\n");
-            String html = root.optString("htmlExportPath", "");
-            String json = root.optString("jsonExportPath", "");
-            if (html.length() > 0 && !"null".equals(html)) {
-                result.append("HTML: ").append(html).append("\n");
-            }
-            if (json.length() > 0 && !"null".equals(json)) {
-                result.append("JSON: ").append(json).append("\n");
-            }
-            String error = root.optString("error", "");
-            if (error.length() > 0 && !"null".equals(error)) {
-                result.append("错误: ").append(error).append("\n");
-            }
-            return result.toString().trim();
+            String scriptName = AgentStore.PREPARE_ALL_SCRIPT_FILE;
+            AgentStore.WriteResult result = AgentStore.writeDownloadFileDetailed(this,
+                    scriptName, readAssetText(scriptName));
+            AgentStore.appendLog(this, "prepare script exported: " + result.summary());
+            showTextDialog("prepare-via-all-db.sh",
+                    "已保存:\n" + result.displayText() + "\n\n"
+                            + "在手机终端执行:\n"
+                            + "su\n"
+                            + "sh /storage/emulated/0/Download/ViaTabsAgent/prepare-via-all-db.sh\n\n"
+                            + "完成后回到这里点击解析数据库。",
+                    true);
+            Toast.makeText(this, "脚本已保存", Toast.LENGTH_SHORT).show();
         } catch (Throwable t) {
-            return "读取最近结果失败: " + t;
+            AgentStore.appendLog(this, "prepare script export failed: " + t);
+            Toast.makeText(this, "保存脚本失败: " + shortError(t), Toast.LENGTH_LONG).show();
         }
     }
 
-    private void runTestExport() {
+    private String readAssetText(String name) throws Exception {
+        InputStream input = getAssets().open(name);
         try {
-            String fileName = "via-test-" + System.currentTimeMillis() + "-1.json";
-            String payload = "{\n"
-                    + "  \"source\": \"module-test-export\",\n"
-                    + "  \"message\": \"如果这个文件存在，说明模块 App 写入 Download 正常\"\n"
-                    + "}\n";
-            String path = AgentStore.writeDownloadFile(this, fileName, payload);
-            boolean deleted = AgentStore.deleteExportedFile(this, fileName);
-            AgentStore.appendLog(this, "测试导出成功: " + path
-                    + "，测试文件已清理: " + (deleted ? "是" : "否"));
-            Toast.makeText(this, "测试导出成功", Toast.LENGTH_SHORT).show();
-        } catch (Throwable t) {
-            AgentStore.appendLog(this, "测试导出失败: " + t);
-            Toast.makeText(this, "测试导出失败", Toast.LENGTH_SHORT).show();
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            byte[] buffer = new byte[4096];
+            int read;
+            while ((read = input.read(buffer)) >= 0) {
+                output.write(buffer, 0, read);
+            }
+            return new String(output.toByteArray(), "UTF-8");
+        } finally {
+            input.close();
         }
     }
 
-    private String buildLogText() {
-        String log = AgentStore.readLog(this);
-        if (log.length() == 0) {
-            return "暂无日志。\n\n请确认 LSPosed 已启用模块，并强制停止 Via 后重开。";
-        }
-        return log;
-    }
-
-    private void addPanelColorChooser(LinearLayout parent) {
-        LinearLayout row = horizontalRow();
-        row.setPadding(0, dp(10), 0, 0);
-        panelStyleSummary = textView(13f, COLOR_MUTED, false);
-        panelStyleSummary.setText(panelStyleSummaryText());
-        row.addView(panelStyleSummary, new LinearLayout.LayoutParams(0,
-                LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        panelStyleButton = stylePreviewButton(AgentStore.getPanelColor(this), true);
-        panelStyleButton.setOnClickListener(new View.OnClickListener() {
+    private void parsePreparedDatabases() {
+        final Context appContext = getApplicationContext();
+        Toast.makeText(this, "正在解析数据库", Toast.LENGTH_SHORT).show();
+        AgentStore.appendLog(this, "parse prepared db requested");
+        new Thread(new Runnable() {
             @Override
-            public void onClick(View v) {
-                showPanelStyleDialog();
-            }
-        });
-        row.addView(panelStyleButton, new LinearLayout.LayoutParams(dp(32), dp(32)));
-        parent.addView(row, matchWrap());
-    }
-
-    private String panelStyleSummaryText() {
-        return "悬浮按钮样式: " + colorLabel(AgentStore.getPanelColor(this))
-                + " / " + AgentStore.getPanelSize(this) + "dp"
-                + " / " + AgentStore.getPanelAlpha(this) + "%";
-    }
-
-    private void showPanelStyleDialog() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(8), dp(4), dp(8), 0);
-
-        final String[] selectedColor = new String[]{AgentStore.getPanelColor(this)};
-        final ArrayList<TextView> swatches = new ArrayList<TextView>();
-        LinearLayout row1 = horizontalRow();
-        LinearLayout row2 = horizontalRow();
-        LinearLayout row3 = horizontalRow();
-        addStyleSwatch(row1, swatches, selectedColor, AgentStore.PANEL_COLOR_BLUE, "蓝");
-        addStyleSwatch(row1, swatches, selectedColor, AgentStore.PANEL_COLOR_GREEN, "绿");
-        addStyleSwatch(row1, swatches, selectedColor, AgentStore.PANEL_COLOR_PURPLE, "紫");
-        addStyleSwatch(row2, swatches, selectedColor, AgentStore.PANEL_COLOR_DARK, "深");
-        addStyleSwatch(row2, swatches, selectedColor, AgentStore.PANEL_COLOR_WHITE, "白");
-        addStyleSwatch(row2, swatches, selectedColor, AgentStore.PANEL_COLOR_TRANSPARENT, "透");
-        addStyleSwatch(row3, swatches, selectedColor, AgentStore.PANEL_COLOR_ROSE, "玫");
-        addStyleSwatch(row3, swatches, selectedColor, AgentStore.PANEL_COLOR_ORANGE, "橙");
-        addStyleSwatch(row3, swatches, selectedColor, AgentStore.PANEL_COLOR_CYAN, "青");
-        root.addView(row1, matchWrap());
-        root.addView(row2, margin(matchWrap(), 0, dp(8), 0, 0));
-        root.addView(row3, margin(matchWrap(), 0, dp(8), 0, dp(8)));
-
-        final TextView alphaText = textView(13f, COLOR_MUTED, false);
-        alphaText.setText("透明度: " + AgentStore.getPanelAlpha(this) + "%");
-        root.addView(alphaText, margin(matchWrap(), 0, dp(8), 0, 0));
-
-        final SeekBar alpha = new SeekBar(this);
-        alpha.setMax(80);
-        alpha.setProgress(AgentStore.getPanelAlpha(this) - 20);
-        alpha.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                alphaText.setText("透明度: " + (progress + 20) + "%");
-            }
-
-            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
-            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
-        });
-        root.addView(alpha, matchWrap());
-
-        final TextView sizeText = textView(13f, COLOR_MUTED, false);
-        sizeText.setText("大小: " + AgentStore.getPanelSize(this) + "dp");
-        root.addView(sizeText, margin(matchWrap(), 0, dp(8), 0, 0));
-
-        final SeekBar size = new SeekBar(this);
-        size.setMax(28);
-        size.setProgress(AgentStore.getPanelSize(this) - 28);
-        size.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                sizeText.setText("大小: " + (progress + 28) + "dp");
-            }
-
-            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
-            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
-        });
-        root.addView(size, matchWrap());
-        refreshStyleSwatches(swatches, selectedColor[0]);
-
-        new AlertDialog.Builder(this)
-                .setTitle("悬浮按钮样式")
-                .setView(root)
-                .setNegativeButton("取消", null)
-                .setPositiveButton("保存", new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        String color = selectedColor[0];
-                        AgentStore.setPanelColor(MainActivity.this, color);
-                        AgentStore.setPanelAlpha(MainActivity.this, alpha.getProgress() + 20);
-                        AgentStore.setPanelSize(MainActivity.this, size.getProgress() + 28);
-                        syncPanelStyleToProvider(color, alpha.getProgress() + 20, size.getProgress() + 28);
-                        sendPanelStyleRefresh();
-                        AgentStore.appendLog(MainActivity.this, "悬浮按钮样式: color=" + color
-                                + " size=" + AgentStore.getPanelSize(MainActivity.this)
-                                + " alpha=" + AgentStore.getPanelAlpha(MainActivity.this));
-                        refreshStatus();
-                        Toast.makeText(MainActivity.this, "悬浮按钮样式已保存，重开 Via 后生效", Toast.LENGTH_SHORT).show();
+            public void run() {
+                final ArrayList<LocalTabStore.ImportResult> results =
+                        new ArrayList<LocalTabStore.ImportResult>();
+                final ArrayList<String> errors = new ArrayList<String>();
+                final ArrayList<String> backupSummaries = new ArrayList<String>();
+                try {
+                    List<String> packages = OfflineViaTabsReader.preparedPackages(appContext);
+                    if (packages.isEmpty()) {
+                        throw new IllegalStateException("没有已提取数据库，请先运行 prepare-via-all-db.sh");
                     }
-                })
-                .show();
-    }
-
-    private void syncPanelStyleToProvider(String color, int alpha, int size) {
-        try {
-            Bundle extras = new Bundle();
-            extras.putString(ExportProvider.EXTRA_PANEL_COLOR, color);
-            extras.putInt(ExportProvider.EXTRA_PANEL_ALPHA, alpha);
-            extras.putInt(ExportProvider.EXTRA_PANEL_SIZE, size);
-            getContentResolver().call(AgentStore.EXPORT_URI,
-                    ExportProvider.METHOD_SET_PANEL_STYLE, null, extras);
-        } catch (Throwable t) {
-            AgentStore.appendLog(this, "sync panel style failed: " + t);
-        }
-    }
-
-    private void sendPanelStyleRefresh() {
-        sendPanelStyleRefresh("mark.via");
-        sendPanelStyleRefresh("mark.via.gp");
-    }
-
-    private void sendPanelStyleRefresh(String packageName) {
-        try {
-            Intent intent = new Intent(Hook.ACTION_REFRESH_PANEL_STYLE);
-            intent.setPackage(packageName);
-            sendBroadcast(intent);
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private void addStyleSwatch(LinearLayout row, final List<TextView> swatches,
-                                final String[] selectedColor, final String color, String label) {
-        final TextView swatch = stylePreviewButton(color, false);
-        swatch.setTag(color);
-        swatch.setContentDescription(label);
-        swatch.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                selectedColor[0] = color;
-                refreshStyleSwatches(swatches, selectedColor[0]);
-            }
-        });
-        swatches.add(swatch);
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(30), dp(30));
-        params.setMargins(0, 0, dp(8), 0);
-        row.addView(swatch, params);
-    }
-
-    private void refreshStyleSwatches(List<TextView> swatches, String selectedColor) {
-        for (TextView swatch : swatches) {
-            String color = swatch.getTag() instanceof String ? (String) swatch.getTag() : AgentStore.PANEL_COLOR_BLUE;
-            boolean selected = color.equals(selectedColor);
-            swatch.setText(selected ? "✔" : "");
-            swatch.setBackground(stylePreviewBackground(color, selected));
-        }
-        if (panelStyleButton != null) {
-            panelStyleButton.setBackground(stylePreviewBackground(AgentStore.getPanelColor(this), true));
-            panelStyleButton.setText("✔");
-        }
-    }
-
-    private TextView stylePreviewButton(String color, boolean selected) {
-        TextView view = textView(13f, previewTextColor(color), true);
-        view.setGravity(Gravity.CENTER);
-        view.setText(selected ? "✔" : "");
-        view.setBackground(stylePreviewBackground(color, selected));
-        return view;
-    }
-
-    private GradientDrawable stylePreviewBackground(String color, boolean selected) {
-        GradientDrawable drawable = new GradientDrawable();
-        drawable.setShape(GradientDrawable.OVAL);
-        drawable.setColor(previewColor(color));
-        drawable.setStroke(dp(selected ? 3 : 1), selected ? COLOR_TEXT : COLOR_BORDER);
-        return drawable;
-    }
-
-    private int previewColor(String color) {
-        if (AgentStore.PANEL_COLOR_GREEN.equals(color)) return Color.rgb(5, 150, 105);
-        if (AgentStore.PANEL_COLOR_PURPLE.equals(color)) return Color.rgb(124, 58, 237);
-        if (AgentStore.PANEL_COLOR_DARK.equals(color)) return Color.rgb(30, 41, 59);
-        if (AgentStore.PANEL_COLOR_WHITE.equals(color)) return Color.WHITE;
-        if (AgentStore.PANEL_COLOR_TRANSPARENT.equals(color)) return Color.rgb(241, 245, 249);
-        if (AgentStore.PANEL_COLOR_ROSE.equals(color)) return Color.rgb(225, 29, 72);
-        if (AgentStore.PANEL_COLOR_ORANGE.equals(color)) return Color.rgb(234, 88, 12);
-        if (AgentStore.PANEL_COLOR_CYAN.equals(color)) return Color.rgb(8, 145, 178);
-        return Color.rgb(37, 99, 235);
-    }
-
-    private int previewTextColor(String color) {
-        if (AgentStore.PANEL_COLOR_WHITE.equals(color) || AgentStore.PANEL_COLOR_TRANSPARENT.equals(color)) {
-            return COLOR_TEXT;
-        }
-        return Color.WHITE;
-    }
-
-    private String colorLabel(String color) {
-        if (AgentStore.PANEL_COLOR_GREEN.equals(color)) return "绿色";
-        if (AgentStore.PANEL_COLOR_PURPLE.equals(color)) return "紫色";
-        if (AgentStore.PANEL_COLOR_DARK.equals(color)) return "深色";
-        if (AgentStore.PANEL_COLOR_WHITE.equals(color)) return "白色";
-        if (AgentStore.PANEL_COLOR_TRANSPARENT.equals(color)) return "透明";
-        if (AgentStore.PANEL_COLOR_ROSE.equals(color)) return "玫红";
-        if (AgentStore.PANEL_COLOR_ORANGE.equals(color)) return "橙色";
-        if (AgentStore.PANEL_COLOR_CYAN.equals(color)) return "青色";
-        return "蓝色";
-    }
-
-    private void showTextDialog(final String title, String text, final boolean canClear) {
-        final TextView content = detailText("日志".equals(title));
-        content.setText(text == null ? "" : text);
-        content.setPadding(dp(14), dp(12), dp(14), dp(12));
-        if ("日志".equals(title)) {
-            content.setTextColor(Color.rgb(226, 232, 240));
-            content.setBackgroundColor(COLOR_LOG_BG);
-        } else {
-            content.setTextColor(COLOR_TEXT);
-            content.setBackgroundColor(Color.WHITE);
-        }
-        ScrollView scroll = new ScrollView(this);
-        scroll.addView(content, new ScrollView.LayoutParams(
-                ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
-        AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle(title)
-                .setView(scroll)
-                .setNegativeButton("清除", null)
-                .setNeutralButton("复制", null)
-                .setPositiveButton("确定", null)
-                .create();
-        dialog.setOnShowListener(new DialogInterface.OnShowListener() {
-            @Override
-            public void onShow(final DialogInterface dialogInterface) {
-                final AlertDialog shown = (AlertDialog) dialogInterface;
-                shown.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        copyText(title, content.getText().toString());
-                    }
-                });
-                shown.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener(new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        if ("日志".equals(title)) {
-                            AgentStore.clearLog(MainActivity.this);
-                            content.setText(buildLogText());
-                            Toast.makeText(MainActivity.this, "日志已清空", Toast.LENGTH_SHORT).show();
-                        } else if ("结果".equals(title)) {
-                            AgentStore.setLastSaveResult(MainActivity.this, "");
-                            content.setText("暂无最近一次保存结果。");
-                            refreshStatus();
-                            Toast.makeText(MainActivity.this, "最近结果已清除", Toast.LENGTH_SHORT).show();
-                        } else if (canClear) {
-                            content.setText("");
-                        } else {
-                            content.setText("");
-                            Toast.makeText(MainActivity.this, "已清空当前显示内容", Toast.LENGTH_SHORT).show();
+                    LocalTabStore store = new LocalTabStore(appContext);
+                    try {
+                        String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US)
+                                .format(new java.util.Date());
+                        for (String packageName : packages) {
+                            OfflineViaTabsReader.ParseResult parsed =
+                                    OfflineViaTabsReader.parsePrepared(appContext, packageName);
+                            ArrayList<String> onePackage = new ArrayList<String>();
+                            onePackage.add(packageName);
+                            String backupName = "备份-" + stamp + "-" + packageDisplayName(packageName);
+                            long backupId = store.createBackup(backupName, onePackage);
+                            AgentStore.appendLog(appContext, "backup created: id=" + backupId
+                                    + " name=" + backupName + " package=" + packageName);
+                            LocalTabStore.ImportResult result = store.importTabs(backupId, packageName,
+                                    parsed.tabs, parsed.database.lastModified());
+                            ArrayList<LocalTabStore.ImportResult> oneResult =
+                                    new ArrayList<LocalTabStore.ImportResult>();
+                            oneResult.add(result);
+                            store.updateBackupSummary(backupId, oneResult);
+                            results.add(result);
+                            backupSummaries.add(backupName + " (#" + backupId + "): "
+                                    + importResultText(result));
+                            AgentStore.appendLog(appContext, "import " + result.summary());
                         }
+                        AgentStore.appendLog(appContext, "backups summarized: " + importSummary(results));
+                    } finally {
+                        store.close();
+                    }
+                } catch (Throwable t) {
+                    errors.add(String.valueOf(t));
+                    AgentStore.appendLog(appContext, "parse prepared db failed: " + t);
+                }
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        refreshStatus();
+                        if (!errors.isEmpty()) {
+                            Toast.makeText(MainActivity.this,
+                                    "解析失败: " + shortError(errors.get(0)),
+                                    Toast.LENGTH_LONG).show();
+                            return;
+                        }
+                        showTextDialog("解析数据库", "备份:\n" + joinLines(backupSummaries)
+                                + "\n\n" + importSummary(results), false);
+                        Toast.makeText(MainActivity.this, "解析完成", Toast.LENGTH_SHORT).show();
                     }
                 });
             }
-        });
-        dialog.show();
+        }, "ViaTabsParseDb").start();
     }
 
-    private void showExportManagerDialog() {
-        final ManagerState state = new ManagerState();
+    private String importSummary(List<LocalTabStore.ImportResult> results) {
+        StringBuilder out = new StringBuilder();
+        int inserted = 0;
+        int updated = 0;
+        int skipped = 0;
+        for (LocalTabStore.ImportResult result : results) {
+            out.append(importResultText(result)).append("\n");
+            inserted += result.inserted;
+            updated += result.updated;
+            skipped += result.skipped;
+        }
+        out.append("\n新增=").append(inserted)
+                .append(" 更新=").append(updated)
+                .append(" 跳过=").append(skipped);
+        return out.toString();
+    }
+
+    private void showBackupsDialog() {
+        final BackupsState state = new BackupsState();
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(10), dp(8), dp(10), dp(8));
@@ -583,64 +317,22 @@ public class MainActivity extends Activity {
         state.summary = textView(13f, COLOR_MUTED, false);
         root.addView(state.summary, matchWrap());
 
-        state.filterButton = smallButton("筛选: 所有", new View.OnClickListener() {
+        LinearLayout actionRow = horizontalRow();
+        state.deletedToggleButton = smallButton("显示已删除", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                showNoteFilterDialog(state);
+                state.includeDeleted = !state.includeDeleted;
+                populateBackups(state);
             }
         });
-        root.addView(state.filterButton, margin(matchWrap(), 0, dp(8), 0, 0));
-
-        LinearLayout selectRow = horizontalRow();
-        selectRow.addView(smallButton("全选", new View.OnClickListener() {
+        actionRow.addView(state.deletedToggleButton, weightParam(1f, dp(6)));
+        actionRow.addView(smallButton("永久清理", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                state.selected.clear();
-                for (AgentStore.ExportGroup group : state.visibleGroups) {
-                    state.selected.add(group.baseName);
-                }
-                populateExportGroups(state);
-            }
-        }), weightParam(1f, dp(6)));
-        selectRow.addView(smallButton("反选", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                Set<String> next = new HashSet<String>();
-                for (AgentStore.ExportGroup group : state.visibleGroups) {
-                    if (!state.selected.contains(group.baseName)) {
-                        next.add(group.baseName);
-                    }
-                }
-                state.selected.clear();
-                state.selected.addAll(next);
-                populateExportGroups(state);
-            }
-        }), weightParam(1f, dp(6)));
-        selectRow.addView(smallButton("清空选择", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                state.selected.clear();
-                populateExportGroups(state);
+                purgeDeletedBackups(state);
             }
         }), weightParam(1f, 0));
-        root.addView(selectRow, margin(matchWrap(), 0, dp(8), 0, 0));
-
-        state.sortButton = smallButton("排序: 时间倒序", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                state.asc = !state.asc;
-                populateExportGroups(state);
-            }
-        });
-        root.addView(state.sortButton, margin(matchWrap(), 0, dp(6), 0, 0));
-
-        Button bulk = actionButton("批量操作", COLOR_PRIMARY_DARK, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                showBulkActionDialog(state);
-            }
-        });
-        root.addView(bulk, margin(matchWrap(), 0, dp(6), 0, dp(6)));
+        root.addView(actionRow, margin(matchWrap(), 0, dp(8), 0, dp(8)));
 
         state.list = new LinearLayout(this);
         state.list.setOrientation(LinearLayout.VERTICAL);
@@ -648,343 +340,707 @@ public class MainActivity extends Activity {
         scroll.addView(state.list, new ScrollView.LayoutParams(
                 ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
         root.addView(scroll, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(420)));
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(460)));
 
         state.dialog = new AlertDialog.Builder(this)
-                .setTitle("本地导出标签数据")
+                .setTitle("备份")
                 .setView(root)
                 .setPositiveButton("关闭", null)
                 .create();
         state.dialog.setOnShowListener(new DialogInterface.OnShowListener() {
             @Override
             public void onShow(DialogInterface dialog) {
-                populateExportGroups(state);
+                populateBackups(state);
             }
         });
         state.dialog.show();
     }
 
-    private void populateExportGroups(final ManagerState state) {
+    private void populateBackups(final BackupsState state) {
+        if (state.list == null) {
+            return;
+        }
         state.list.removeAllViews();
-        List<AgentStore.ExportGroup> groups = AgentStore.listExportGroups(this);
-        normalizeNoteFilter(state, groups);
-        if (state.asc) {
-            Collections.sort(groups, new Comparator<AgentStore.ExportGroup>() {
-                @Override
-                public int compare(AgentStore.ExportGroup left, AgentStore.ExportGroup right) {
-                    if (left.lastModified == right.lastModified) {
-                        return left.baseName.compareTo(right.baseName);
-                    }
-                    return left.lastModified < right.lastModified ? -1 : 1;
-                }
-            });
-        }
-        state.visibleGroups.clear();
-        for (AgentStore.ExportGroup group : groups) {
-            String note = group.note == null ? "" : group.note;
-            if (!matchesNoteFilter(state, note)) {
-                continue;
-            }
-            state.visibleGroups.add(group);
-        }
-        updateManagerSummary(state);
-        if (state.sortButton != null) {
-            state.sortButton.setText("排序: " + (state.asc ? "时间正序" : "时间倒序"));
-        }
-        if (state.visibleGroups.isEmpty()) {
+        state.visibleBackups.clear();
+        state.totalBackups = tabStore.countBackups(state.includeDeleted);
+        updateBackupsSummary(state);
+        if (state.totalBackups == 0) {
             TextView empty = textView(14f, COLOR_MUTED, false);
-            empty.setText("暂无 via-*.html / via-*.json 导出数据。");
+            empty.setText("暂无备份。先运行脚本并点击解析数据库。");
             state.list.addView(empty, matchWrap());
             return;
         }
-        SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US);
-        for (final AgentStore.ExportGroup group : state.visibleGroups) {
-            LinearLayout item = panel();
-            item.setPadding(dp(10), dp(8), dp(10), dp(8));
+        appendBackupsPage(state);
+    }
 
-            CheckBox selected = switchView(group.baseName);
-            selected.setChecked(state.selected.contains(group.baseName));
+    private void appendBackupsPage(final BackupsState state) {
+        if (state.list == null) {
+            return;
+        }
+        if (state.loadMoreButton != null) {
+            state.list.removeView(state.loadMoreButton);
+            state.loadMoreButton = null;
+        }
+        List<ManagedBackup> next = tabStore.listBackups(state.includeDeleted,
+                BACKUP_PAGE_SIZE, state.visibleBackups.size());
+        state.visibleBackups.addAll(next);
+        updateBackupsSummary(state);
+        final SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US);
+        for (final ManagedBackup backup : next) {
+            LinearLayout item = listItemPanel();
+
+            TextView title = textView(15f, backup.deleted ? COLOR_MUTED : COLOR_TEXT, true);
+            title.setText(backup.name + (backup.deleted ? "  已删除" : ""));
+            title.setSingleLine(true);
+            title.setEllipsize(TextUtils.TruncateAt.END);
+            item.addView(title, matchWrap());
+
+            TextView meta = textView(12f, COLOR_MUTED, false);
+            meta.setText(sourceLabel(backup.sourcePackages)
+                    + " · " + format.format(new java.util.Date(backup.createdAt))
+                    + " · 可用 " + backup.activeTabs
+                    + " / 已删 " + backup.deletedTabs
+                    + " / 共 " + backup.totalTabs
+                    + " · 新增 " + backup.inserted
+                    + " / 更新 " + backup.updated
+                    + " / 跳过 " + backup.skipped);
+            item.addView(meta, matchWrap());
+            if (backup.note != null && backup.note.trim().length() > 0) {
+                TextView note = textView(12f, COLOR_MUTED, false);
+                note.setText("备注: " + backup.note.trim());
+                note.setSingleLine(true);
+                note.setEllipsize(TextUtils.TruncateAt.END);
+                item.addView(note, matchWrap());
+            }
+
+            LinearLayout actions = horizontalRow();
+            actions.addView(listButton("进入", new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    showTagsDialog(backup);
+                }
+            }), weightParam(1f, dp(6)));
+            actions.addView(listButton("导出", new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    exportBackupHtml(backup);
+                }
+            }), weightParam(1f, dp(6)));
+            actions.addView(listButton("备注", new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    editBackupNote(state, backup);
+                }
+            }), weightParam(1f, dp(6)));
+
+            Button delete = listButton(backup.deleted ? "恢复备份" : "删除备份", new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    int changed = tabStore.setBackupDeleted(backup.id, !backup.deleted);
+                    AgentStore.appendLog(MainActivity.this,
+                            (backup.deleted ? "restore backup " : "delete backup ")
+                                    + backup.id + " changed=" + changed);
+                    refreshStatus();
+                    populateBackups(state);
+                }
+            });
+            delete.setTextColor(backup.deleted ? COLOR_TEXT : COLOR_DANGER);
+            actions.addView(delete, weightParam(1f, 0));
+            item.addView(actions, margin(matchWrap(), 0, dp(5), 0, 0));
+
+            state.list.addView(item, margin(matchWrap(), 0, 0, 0, dp(6)));
+        }
+        if (state.visibleBackups.size() < state.totalBackups) {
+            state.loadMoreButton = smallButton("加载更多", new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    appendBackupsPage(state);
+                }
+            });
+            state.list.addView(state.loadMoreButton, margin(matchWrap(), 0, 0, 0, dp(8)));
+        }
+    }
+
+    private void updateBackupsSummary(BackupsState state) {
+        if (state.summary == null) {
+            return;
+        }
+        state.summary.setText("显示 " + state.visibleBackups.size() + " / "
+                + state.totalBackups + " 个备份，已删除备份: "
+                + (state.includeDeleted ? "显示" : "隐藏"));
+        if (state.deletedToggleButton != null) {
+            state.deletedToggleButton.setText(state.includeDeleted ? "隐藏已删除" : "显示已删除");
+        }
+    }
+
+    private void editBackupNote(final BackupsState state, final ManagedBackup backup) {
+        final EditText note = new EditText(this);
+        note.setSingleLine(false);
+        note.setMinLines(3);
+        note.setText(backup.note);
+        new AlertDialog.Builder(this)
+                .setTitle("备份备注")
+                .setView(note)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("保存", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        int changed = tabStore.updateBackupNote(backup.id, note.getText().toString());
+                        AgentStore.appendLog(MainActivity.this,
+                                "edit backup note " + backup.id + " changed=" + changed);
+                        populateBackups(state);
+                    }
+                })
+                .show();
+    }
+
+    private void purgeDeletedBackups(final BackupsState state) {
+        new AlertDialog.Builder(this)
+                .setTitle("清理已删除备份？")
+                .setMessage("会永久删除本地库中标记为已删除的备份和其中标签，不影响 Via。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("清理", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        int count = tabStore.purgeDeletedBackups();
+                        AgentStore.appendLog(MainActivity.this, "purge deleted backups count=" + count);
+                        refreshStatus();
+                        populateBackups(state);
+                    }
+                })
+                .show();
+    }
+
+    private void showTagsDialog(ManagedBackup backup) {
+        final TagsState state = new TagsState();
+        state.backupId = backup.id;
+        state.backupName = backup.name;
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(10), dp(8), dp(10), dp(8));
+
+        state.summary = textView(12f, COLOR_MUTED, false);
+        root.addView(state.summary, matchWrap());
+
+        LinearLayout filterRow = horizontalRow();
+        state.queryInput = new EditText(this);
+        state.queryInput.setSingleLine(true);
+        state.queryInput.setHint("搜索标题、网址、备注");
+        state.queryInput.setTextSize(12f);
+        state.queryInput.setMinHeight(0);
+        state.queryInput.setMinimumHeight(0);
+        state.queryInput.setPadding(dp(6), 0, dp(6), 0);
+        state.queryInput.setIncludeFontPadding(false);
+        filterRow.addView(state.queryInput, new LinearLayout.LayoutParams(0, dp(32), 1f));
+        filterRow.addView(smallButton("搜索", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                state.query = state.queryInput.getText().toString();
+                populateTags(state);
+            }
+        }), new LinearLayout.LayoutParams(dp(64), dp(32)));
+        root.addView(filterRow, margin(matchWrap(), 0, dp(5), 0, 0));
+
+        LinearLayout optionRow = horizontalRow();
+        optionRow.addView(smallButton("新增", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                addManualTab(state);
+            }
+        }), weightParam(1f, dp(6)));
+        optionRow.addView(smallButton("域名", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showDomainFilter(state);
+            }
+        }), weightParam(1f, dp(6)));
+        state.deletedToggleButton = smallButton("显示已删除", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                state.includeDeleted = !state.includeDeleted;
+                populateTags(state);
+            }
+        });
+        optionRow.addView(state.deletedToggleButton, weightParam(1f, 0));
+        root.addView(optionRow, margin(matchWrap(), 0, dp(6), 0, 0));
+
+        LinearLayout actionRow = horizontalRow();
+        actionRow.addView(smallButton("选已加载", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                state.selected.clear();
+                for (ManagedTab tab : state.visibleTabs) {
+                    state.selected.add(tab.id);
+                }
+                updateTagsSummary(state);
+            }
+        }), weightParam(1f, dp(6)));
+        actionRow.addView(smallButton("清空", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                state.selected.clear();
+                updateTagsSummary(state);
+            }
+        }), weightParam(1f, dp(6)));
+        actionRow.addView(smallButton("导出选中", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                exportSelectedHtml(state);
+            }
+        }), weightParam(1f, 0));
+        root.addView(actionRow, margin(matchWrap(), 0, dp(6), 0, 0));
+
+        LinearLayout deleteRow = horizontalRow();
+        Button delete = smallButton("删除选中", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                setSelectedDeleted(state, true);
+            }
+        });
+        delete.setTextColor(COLOR_DANGER);
+        deleteRow.addView(delete, weightParam(1f, dp(6)));
+        deleteRow.addView(smallButton("恢复选中", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                setSelectedDeleted(state, false);
+            }
+        }), weightParam(1f, dp(6)));
+        deleteRow.addView(smallButton("永久清理", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                purgeDeleted(state);
+            }
+        }), weightParam(1f, 0));
+        root.addView(deleteRow, margin(matchWrap(), 0, dp(6), 0, dp(6)));
+
+        state.list = new LinearLayout(this);
+        state.list.setOrientation(LinearLayout.VERTICAL);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(state.list, new ScrollView.LayoutParams(
+                ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
+        root.addView(scroll, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(440)));
+
+        state.dialog = new AlertDialog.Builder(this)
+                .setTitle("标签: " + backup.name)
+                .setView(root)
+                .setPositiveButton("关闭", null)
+                .create();
+        state.dialog.setOnShowListener(new DialogInterface.OnShowListener() {
+            @Override
+            public void onShow(DialogInterface dialog) {
+                populateTags(state);
+            }
+        });
+        state.dialog.show();
+    }
+
+    private void populateTags(final TagsState state) {
+        if (state.list == null) {
+            return;
+        }
+        state.list.removeAllViews();
+        state.visibleTabs.clear();
+        state.totalTabs = tabStore.countTabs(state.backupId, SOURCE_ALL,
+                state.domainFilter, state.query, state.includeDeleted);
+        updateTagsSummary(state);
+        if (state.totalTabs == 0) {
+            TextView empty = textView(14f, COLOR_MUTED, false);
+            empty.setText("暂无标签。先运行脚本并点击解析数据库。");
+            state.list.addView(empty, matchWrap());
+            return;
+        }
+        appendTagsPage(state);
+    }
+
+    private void appendTagsPage(final TagsState state) {
+        if (state.list == null) {
+            return;
+        }
+        if (state.loadMoreButton != null) {
+            state.list.removeView(state.loadMoreButton);
+            state.loadMoreButton = null;
+        }
+        List<ManagedTab> next = tabStore.listTabs(state.backupId, SOURCE_ALL,
+                state.domainFilter, state.query, state.includeDeleted,
+                TAG_PAGE_SIZE, state.visibleTabs.size());
+        state.visibleTabs.addAll(next);
+        updateTagsSummary(state);
+        SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US);
+        for (final ManagedTab tab : next) {
+            LinearLayout item = listItemPanel();
+
+            CheckBox selected = compactCheckBox(trimMiddle(tab.title, 80)
+                    + (tab.deleted ? "  已删除" : ""));
+            selected.setChecked(state.selected.contains(tab.id));
+            selected.setTextColor(tab.deleted ? COLOR_MUTED : COLOR_TEXT);
             selected.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
                     if (((CheckBox) v).isChecked()) {
-                        state.selected.add(group.baseName);
+                        state.selected.add(tab.id);
                     } else {
-                        state.selected.remove(group.baseName);
+                        state.selected.remove(tab.id);
                     }
-                    updateManagerSummary(state);
+                    updateTagsSummary(state);
                 }
             });
             item.addView(selected, matchWrap());
 
             TextView meta = textView(12f, COLOR_MUTED, false);
-            meta.setText("来源: " + safeText(group.packageName, "未知来源")
-                    + "  ·  " + format.format(new java.util.Date(group.lastModified))
-                    + "  ·  " + formatSize(group.size)
-                    + "\n标签: " + group.captured + " / 可保存: " + group.bookmarkable
-                    + "\nHTML: " + safeText(group.htmlName, "缺失")
-                    + "\nJSON: " + safeText(group.jsonName, "缺失")
-                    + "\n备注: " + safeText(group.note, "无"));
+            meta.setText(safeText(tab.domain, "无域名")
+                    + " · " + format.format(new java.util.Date(tab.lastSeenTime)));
             item.addView(meta, matchWrap());
 
+            TextView url = textView(12f, COLOR_MUTED, false);
+            url.setText(tab.url);
+            url.setSingleLine(true);
+            url.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+            item.addView(url, matchWrap());
+
+            if (tab.note != null && tab.note.trim().length() > 0) {
+                TextView note = textView(12f, COLOR_MUTED, false);
+                note.setText("备注: " + tab.note.trim());
+                note.setSingleLine(true);
+                note.setEllipsize(TextUtils.TruncateAt.END);
+                item.addView(note, matchWrap());
+            }
+
             LinearLayout actions = horizontalRow();
-            actions.addView(smallButton("备注", new View.OnClickListener() {
+            actions.addView(listButton("编辑", new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    editNote(state, group);
+                    editTab(state, tab);
                 }
             }), weightParam(1f, dp(6)));
-            Button delete = smallButton("删除", new View.OnClickListener() {
+            actions.addView(listButton(tab.deleted ? "恢复" : "删除", new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    confirmDeleteGroup(state, group.baseName);
+                    ArrayList<Long> ids = new ArrayList<Long>();
+                    ids.add(tab.id);
+                    int changed = tabStore.setDeleted(ids, !tab.deleted);
+                    AgentStore.appendLog(MainActivity.this,
+                            (tab.deleted ? "restore tab " : "delete tab ") + tab.id + " changed=" + changed);
+                    refreshStatus();
+                    populateTags(state);
+                }
+            }), weightParam(1f, 0));
+            item.addView(actions, margin(matchWrap(), 0, dp(5), 0, 0));
+            state.list.addView(item, margin(matchWrap(), 0, 0, 0, dp(6)));
+        }
+        if (state.visibleTabs.size() < state.totalTabs) {
+            state.loadMoreButton = smallButton("加载更多", new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    appendTagsPage(state);
                 }
             });
-            delete.setTextColor(COLOR_DANGER);
-            actions.addView(delete, weightParam(1f, 0));
-            item.addView(actions, margin(matchWrap(), 0, dp(6), 0, 0));
-
-            state.list.addView(item, margin(matchWrap(), 0, 0, 0, dp(8)));
+            state.list.addView(state.loadMoreButton, margin(matchWrap(), 0, 0, 0, dp(8)));
         }
     }
 
-    private void showNoteFilterDialog(final ManagerState state) {
-        final List<AgentStore.ExportGroup> groups = AgentStore.listExportGroups(this);
-        final ArrayList<NoteFilterOption> options = buildNoteFilterOptions(groups);
+    private void updateTagsSummary(TagsState state) {
+        if (state.summary == null) {
+            return;
+        }
+        state.summary.setText("显示 " + state.visibleTabs.size() + " / "
+                + state.totalTabs + " 条，已选 " + state.selected.size()
+                + "  备份: " + trimMiddle(state.backupName, 36)
+                + "\n域名: " + labelOrAll(state.domainFilter)
+                + "  已删除标签: " + (state.includeDeleted ? "显示" : "隐藏"));
+        if (state.deletedToggleButton != null) {
+            state.deletedToggleButton.setText(state.includeDeleted ? "隐藏已删除" : "显示已删除");
+        }
+    }
+
+    private void editTab(final TagsState state, final ManagedTab tab) {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        final EditText title = new EditText(this);
+        title.setSingleLine(true);
+        title.setText(tab.title);
+        final EditText note = new EditText(this);
+        note.setSingleLine(false);
+        note.setMinLines(3);
+        note.setText(tab.note);
+        root.addView(label("标题"), matchWrap());
+        root.addView(title, matchWrap());
+        root.addView(label("备注"), matchWrap());
+        root.addView(note, matchWrap());
+        new AlertDialog.Builder(this)
+                .setTitle("编辑标签")
+                .setView(root)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("保存", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        int changed = tabStore.updateText(tab.id, title.getText().toString(),
+                                note.getText().toString());
+                        AgentStore.appendLog(MainActivity.this, "edit tab " + tab.id + " changed=" + changed);
+                        populateTags(state);
+                    }
+                })
+                .show();
+    }
+
+    private void addManualTab(final TagsState state) {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        final EditText url = new EditText(this);
+        url.setSingleLine(true);
+        url.setHint("https://example.com/");
+        final EditText title = new EditText(this);
+        title.setSingleLine(true);
+        title.setHint("标题");
+        final EditText note = new EditText(this);
+        note.setSingleLine(false);
+        note.setMinLines(3);
+        root.addView(label("网址"), matchWrap());
+        root.addView(url, matchWrap());
+        root.addView(label("标题"), matchWrap());
+        root.addView(title, matchWrap());
+        root.addView(label("备注"), matchWrap());
+        root.addView(note, matchWrap());
+        new AlertDialog.Builder(this)
+                .setTitle("新增标签")
+                .setView(root)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("保存", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        try {
+                            long id = tabStore.addManualTab(state.backupId,
+                                    title.getText().toString(), url.getText().toString(),
+                                    note.getText().toString());
+                            AgentStore.appendLog(MainActivity.this, "manual tab saved backup="
+                                    + state.backupId + " id=" + id);
+                            refreshStatus();
+                            populateTags(state);
+                        } catch (Throwable t) {
+                            AgentStore.appendLog(MainActivity.this, "manual tab save failed: " + t);
+                            Toast.makeText(MainActivity.this,
+                                    "新增失败: " + shortError(t), Toast.LENGTH_LONG).show();
+                        }
+                    }
+                })
+                .show();
+    }
+
+    private void showDomainFilter(final TagsState state) {
+        List<String> domains = tabStore.listDomains(state.backupId, state.includeDeleted);
+        final ArrayList<String> values = new ArrayList<String>();
+        values.add(DOMAIN_ALL);
+        values.addAll(domains);
+        String[] labels = new String[values.size()];
         int checked = 0;
-        String[] labels = new String[options.size()];
-        for (int i = 0; i < options.size(); i++) {
-            NoteFilterOption option = options.get(i);
-            labels[i] = option.label;
-            if (option.matches(state.filterMode, state.filterNote)) {
+        for (int i = 0; i < values.size(); i++) {
+            String value = values.get(i);
+            labels[i] = value.length() == 0 ? "全部" : value;
+            if (value.equals(state.domainFilter)) {
                 checked = i;
             }
         }
         new AlertDialog.Builder(this)
-                .setTitle("选择筛选条件")
+                .setTitle("域名筛选")
                 .setSingleChoiceItems(labels, checked, new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
-                        NoteFilterOption option = options.get(which);
-                        state.filterMode = option.mode;
-                        state.filterNote = option.note;
-                        populateExportGroups(state);
+                        state.domainFilter = values.get(which);
+                        populateTags(state);
                         dialog.dismiss();
                     }
                 })
-                .setNegativeButton("取消", null)
                 .show();
     }
 
-    private ArrayList<NoteFilterOption> buildNoteFilterOptions(List<AgentStore.ExportGroup> groups) {
-        ArrayList<NoteFilterOption> options = new ArrayList<NoteFilterOption>();
-        options.add(new NoteFilterOption(FILTER_ALL, "", "所有"));
-        LinkedHashSet<String> notes = new LinkedHashSet<String>();
-        for (AgentStore.ExportGroup group : groups) {
-            String note = group.note == null ? "" : group.note.trim();
-            if (note.length() > 0) {
-                notes.add(note);
-            }
+    private void setSelectedDeleted(TagsState state, boolean deleted) {
+        if (state.selected.isEmpty()) {
+            Toast.makeText(this, "请先选择标签", Toast.LENGTH_SHORT).show();
+            return;
         }
-        for (String note : notes) {
-            options.add(new NoteFilterOption(FILTER_NOTE, note, note));
-        }
-        options.add(new NoteFilterOption(FILTER_NONE, "", "未备注"));
-        return options;
+        int changed = tabStore.setDeleted(new ArrayList<Long>(state.selected), deleted);
+        AgentStore.appendLog(this, (deleted ? "delete selected tabs " : "restore selected tabs ")
+                + "count=" + changed);
+        state.selected.clear();
+        refreshStatus();
+        populateTags(state);
     }
 
-    private void normalizeNoteFilter(ManagerState state, List<AgentStore.ExportGroup> groups) {
-        if (!FILTER_NOTE.equals(state.filterMode)) {
+    private void purgeDeleted(final TagsState state) {
+        new AlertDialog.Builder(this)
+                .setTitle("清理已删除标签？")
+                .setMessage("会永久删除本地库中标记为已删除的标签，不影响 Via。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("清理", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        int count = tabStore.purgeDeleted(state.backupId);
+                        AgentStore.appendLog(MainActivity.this, "purge deleted tabs backup="
+                                + state.backupId + " count=" + count);
+                        state.selected.clear();
+                        refreshStatus();
+                        populateTags(state);
+                    }
+                })
+                .show();
+    }
+
+    private void exportHtmlFromStore() {
+        ManagedBackup latest = tabStore.latestBackup();
+        if (latest == null) {
+            Toast.makeText(this, "没有可导出的备份", Toast.LENGTH_SHORT).show();
             return;
         }
-        String target = state.filterNote == null ? "" : state.filterNote.trim();
-        if (target.length() == 0) {
-            state.filterMode = FILTER_ALL;
-            state.filterNote = "";
+        exportBackupHtml(latest);
+    }
+
+    private void exportBackupHtml(ManagedBackup backup) {
+        if (backup == null) {
+            Toast.makeText(this, "没有可导出的备份", Toast.LENGTH_SHORT).show();
             return;
         }
-        for (AgentStore.ExportGroup group : groups) {
-            String note = group.note == null ? "" : group.note.trim();
-            if (target.equals(note)) {
+        exportTabs(tabStore.listTabs(backup.id, SOURCE_ALL, DOMAIN_ALL, "", false),
+                backup.name);
+    }
+
+    private void exportSelectedHtml(TagsState state) {
+        if (state.selected.isEmpty()) {
+            Toast.makeText(this, "请先选择标签", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        ArrayList<ManagedTab> selected = new ArrayList<ManagedTab>();
+        for (ManagedTab tab : state.visibleTabs) {
+            if (state.selected.contains(tab.id) && !tab.deleted) {
+                selected.add(tab);
+            }
+        }
+        exportTabs(selected, state.backupName);
+    }
+
+    private void exportTabs(List<ManagedTab> managedTabs, String sourceName) {
+        try {
+            List<TabRecord> records = toTabRecords(managedTabs);
+            if (records.isEmpty()) {
+                Toast.makeText(this, "没有可导出的标签", Toast.LENGTH_SHORT).show();
                 return;
             }
-        }
-        state.filterMode = FILTER_ALL;
-        state.filterNote = "";
-    }
-
-    private boolean matchesNoteFilter(ManagerState state, String note) {
-        String value = note == null ? "" : note.trim();
-        if (FILTER_NONE.equals(state.filterMode)) {
-            return value.length() == 0;
-        }
-        if (FILTER_NOTE.equals(state.filterMode)) {
-            String target = state.filterNote == null ? "" : state.filterNote.trim();
-            return target.length() > 0 && target.equals(value);
-        }
-        if (FILTER_ALL.equals(state.filterMode)) {
-            return true;
-        }
-        return true;
-    }
-
-    private String noteFilterLabel(ManagerState state) {
-        if (FILTER_NONE.equals(state.filterMode)) {
-            return "未备注";
-        }
-        if (FILTER_NOTE.equals(state.filterMode)) {
-            return state.filterNote == null || state.filterNote.trim().length() == 0
-                    ? "所有"
-                    : state.filterNote.trim();
-        }
-        return "所有";
-    }
-
-    private void updateManagerSummary(ManagerState state) {
-        if (state.summary == null) {
-            return;
-        }
-        state.summary.setText("共 " + state.visibleGroups.size() + " 组，已选择 " + state.selected.size()
-                + " 组，筛选: " + noteFilterLabel(state)
-                + "，排序: " + (state.asc ? "时间正序" : "时间倒序"));
-        if (state.filterButton != null) {
-            state.filterButton.setText("筛选: " + noteFilterLabel(state));
-        }
-    }
-
-    private void editNote(final ManagerState state, final AgentStore.ExportGroup group) {
-        final EditText input = new EditText(this);
-        input.setText(group.note == null ? "" : group.note);
-        input.setSingleLine(false);
-        new AlertDialog.Builder(this)
-                .setTitle("编辑备注")
-                .setView(input)
-                .setNegativeButton("取消", null)
-                .setPositiveButton("保存", new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        AgentStore.setExportNote(MainActivity.this, group.baseName, input.getText().toString());
-                        populateExportGroups(state);
-                    }
-                })
-                .show();
-    }
-
-    private void confirmDeleteGroup(final ManagerState state, final String baseName) {
-        new AlertDialog.Builder(this)
-                .setTitle("删除导出数据？")
-                .setMessage(baseName + "\n将同时删除对应 HTML/JSON 文件。")
-                .setNegativeButton("取消", null)
-                .setPositiveButton("删除", new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        AgentStore.deleteExportGroup(MainActivity.this, baseName);
-                        state.selected.remove(baseName);
-                        populateExportGroups(state);
-                    }
-                })
-                .show();
-    }
-
-    private void showBulkActionDialog(final ManagerState state) {
-        if (state.selected.isEmpty()) {
-            Toast.makeText(this, "请先选择数据组", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        final String[] actions = new String[]{
-                "导入到 mark.via",
-                "导入到 mark.via.gp",
-                "批量备注",
-                "删除所选"
-        };
-        new AlertDialog.Builder(this)
-                .setTitle("批量操作（已选 " + state.selected.size() + " 组）")
-                .setItems(actions, new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        if (which == 0) {
-                            importSelectedGroups(state, "mark.via");
-                        } else if (which == 1) {
-                            importSelectedGroups(state, "mark.via.gp");
-                        } else if (which == 2) {
-                            editSelectedNotes(state);
-                        } else if (which == 3) {
-                            confirmDeleteSelected(state);
+            boolean groupByDomain = AgentStore.isDomainGroupEnabled(this);
+            BookmarkBatch batch = BookmarkBatches.create(records, groupByDomain);
+            String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US)
+                    .format(new java.util.Date());
+            String htmlName = "via-bookmarks-" + stamp + "-" + batch.bookmarkCount + ".html";
+            String jsonName = "via-bookmarks-" + stamp + "-" + batch.bookmarkCount + ".json";
+            String html = BookmarkHtml.toNetscapeBookmarksHtml(batch, records,
+                    new BookmarkHtml.TitleProvider() {
+                        @Override
+                        public String titleFor(TabRecord tab) {
+                            return OfflineViaTabsReader.displayTitle(tab);
                         }
-                    }
-                })
-                .show();
+                    });
+            AgentStore.WriteResult htmlResult = AgentStore.writeDownloadFileDetailed(this, htmlName, html);
+            AgentStore.WriteResult jsonResult = AgentStore.writeDownloadFileDetailed(this, jsonName,
+                    exportJson(records, groupByDomain, sourceName));
+            AgentStore.appendLog(this, "export bookmarks html: tabs=" + records.size()
+                    + " source=" + safeText(sourceName, "local")
+                    + " html=" + htmlResult.summary() + " json=" + jsonResult.summary());
+            showTextDialog("导出书签",
+                    "来源:\n" + safeText(sourceName, "本地") + "\n\n"
+                            + "书签文件:\n" + htmlResult.displayText() + "\n\n"
+                            + "备份数据:\n" + jsonResult.displayText() + "\n\n"
+                            + "在 Via 书签导入中选择这个书签文件。",
+                    false);
+            refreshStatus();
+        } catch (Throwable t) {
+            AgentStore.appendLog(this, "export html failed: " + t);
+            Toast.makeText(this, "导出失败: " + shortError(t), Toast.LENGTH_LONG).show();
+        }
     }
 
-    private void editSelectedNotes(final ManagerState state) {
-        if (state.selected.isEmpty()) {
-            Toast.makeText(this, "请先选择数据组", Toast.LENGTH_SHORT).show();
-            return;
+    private List<TabRecord> toTabRecords(List<ManagedTab> managedTabs) {
+        ArrayList<TabRecord> out = new ArrayList<TabRecord>();
+        LinkedHashSet<String> seen = new LinkedHashSet<String>();
+        if (managedTabs == null) {
+            return out;
         }
-        final EditText input = new EditText(this);
-        input.setSingleLine(false);
-        input.setHint("留空可清除所选备注");
-        new AlertDialog.Builder(this)
-                .setTitle("批量备注（已选 " + state.selected.size() + " 组）")
-                .setView(input)
-                .setNegativeButton("取消", null)
-                .setPositiveButton("保存", new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        String note = input.getText().toString();
-                        for (String baseName : new ArrayList<String>(state.selected)) {
-                            AgentStore.setExportNote(MainActivity.this, baseName, note);
-                        }
-                        populateExportGroups(state);
-                    }
-                })
-                .show();
-    }
-
-    private void confirmDeleteSelected(final ManagerState state) {
-        if (state.selected.isEmpty()) {
-            Toast.makeText(this, "请先选择数据组", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        new AlertDialog.Builder(this)
-                .setTitle("批量删除？")
-                .setMessage("将删除 " + state.selected.size() + " 组导出数据。")
-                .setNegativeButton("取消", null)
-                .setPositiveButton("删除", new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        for (String baseName : new ArrayList<String>(state.selected)) {
-                            AgentStore.deleteExportGroup(MainActivity.this, baseName);
-                        }
-                        state.selected.clear();
-                        populateExportGroups(state);
-                    }
-                })
-                .show();
-    }
-
-    private void importSelectedGroups(ManagerState state, String targetPackage) {
-        if (state.selected.isEmpty()) {
-            Toast.makeText(this, "请先选择数据组", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        ArrayList<String> jsonNames = new ArrayList<String>();
-        ArrayList<String> htmlNames = new ArrayList<String>();
-        for (AgentStore.ExportGroup group : state.visibleGroups) {
-            if (!state.selected.contains(group.baseName)) {
+        for (ManagedTab tab : managedTabs) {
+            if (tab == null || tab.deleted || !TabUrls.isBookmarkable(tab.url)) {
                 continue;
             }
-            jsonNames.add(group.jsonName == null ? "" : group.jsonName);
-            htmlNames.add(group.htmlName == null ? "" : group.htmlName);
+            String key = TabUrls.key(tab.url);
+            if (key.length() == 0 || !seen.add(key)) {
+                continue;
+            }
+            out.add(new TabRecord(out.size(), tab.title, tab.url));
         }
-        Intent intent = new Intent(Hook.ACTION_IMPORT_EXPORT_GROUPS);
-        intent.setPackage(targetPackage);
-        intent.putStringArrayListExtra(Hook.EXTRA_JSON_NAMES, jsonNames);
-        intent.putStringArrayListExtra(Hook.EXTRA_HTML_NAMES, htmlNames);
-        sendBroadcast(intent);
-        AgentStore.appendLog(this, "发送本地导出数据导入请求: target=" + targetPackage
-                + " groups=" + jsonNames.size());
-        Toast.makeText(this, "已发送导入请求，请确认目标 Via 已打开并已被 LSPosed 注入", Toast.LENGTH_LONG).show();
+        return out;
+    }
+
+    private String exportJson(List<TabRecord> records, boolean groupByDomain,
+                              String sourceName) throws Exception {
+        JSONObject root = SnapshotJson.base("bookmarks.localExport", safeText(sourceName, "local"));
+        root.put("sourceName", safeText(sourceName, "local"));
+        root.put("domainGroup", groupByDomain);
+        root.put("captured", records.size());
+        root.put("bookmarkable", BookmarkBatches.countBookmarkable(records));
+        root.put("tabs", SnapshotJson.tabRecords(records, new BookmarkHtml.TitleProvider() {
+            @Override
+            public String titleFor(TabRecord tab) {
+                return OfflineViaTabsReader.displayTitle(tab);
+            }
+        }));
+        return root.toString(2);
+    }
+
+    private void showLogDialog() {
+        showTextDialog("日志", buildLogText(), true);
+    }
+
+    private String buildLogText() {
+        String log = AgentStore.readLog(this);
+        return log.length() == 0 ? "暂无日志。" : log;
+    }
+
+    private void showTextDialog(final String title, final String text, final boolean canClear) {
+        final TextView content = detailText(true);
+        content.setText(text == null ? "" : text);
+        ScrollView scroll = new ScrollView(this);
+        scroll.setPadding(dp(12), dp(8), dp(12), dp(8));
+        scroll.addView(content, new ScrollView.LayoutParams(
+                ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setView(scroll)
+                .setPositiveButton("关闭", null)
+                .setNeutralButton("复制", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        copyText(title, content.getText().toString());
+                    }
+                })
+                .setNegativeButton(canClear ? "清空" : null, null)
+                .create();
+        dialog.setOnShowListener(new DialogInterface.OnShowListener() {
+            @Override
+            public void onShow(final DialogInterface dialogInterface) {
+                final AlertDialog alert = (AlertDialog) dialogInterface;
+                Button clear = alert.getButton(AlertDialog.BUTTON_NEGATIVE);
+                if (clear != null) {
+                    clear.setOnClickListener(new View.OnClickListener() {
+                        @Override
+                        public void onClick(View v) {
+                            if ("日志".equals(title)) {
+                                AgentStore.clearLog(MainActivity.this);
+                                content.setText(buildLogText());
+                                Toast.makeText(MainActivity.this, "日志已清空", Toast.LENGTH_SHORT).show();
+                            } else {
+                                content.setText("");
+                            }
+                        }
+                    });
+                }
+            }
+        });
+        dialog.show();
     }
 
     private boolean isPackageInstalled(String packageName) {
@@ -996,22 +1052,116 @@ public class MainActivity extends Activity {
         }
     }
 
+    private String installedText(String packageName) {
+        return isPackageInstalled(packageName) ? "已安装" : "未安装";
+    }
+
+    private String preparedText(String packageName) {
+        return OfflineViaTabsReader.hasPreparedDatabase(this, packageName) ? "已准备" : "缺失";
+    }
+
+    private String labelOrAll(String value) {
+        return value == null || value.length() == 0 ? "全部" : value;
+    }
+
+    private String packageDisplayName(String packageName) {
+        if ("mark.via".equals(packageName)) {
+            return "国内版";
+        }
+        if ("mark.via.gp".equals(packageName)) {
+            return "GP版";
+        }
+        return safeText(packageName, "未知来源");
+    }
+
+    private String sourceLabel(String source) {
+        if (source == null || source.trim().length() == 0) {
+            return "全部";
+        }
+        String[] parts = source.split(",");
+        StringBuilder out = new StringBuilder();
+        for (String part : parts) {
+            String clean = part == null ? "" : part.trim();
+            if (clean.length() == 0) {
+                continue;
+            }
+            if (out.length() > 0) {
+                out.append(" / ");
+            }
+            out.append(packageDisplayName(clean));
+        }
+        return out.length() == 0 ? "全部" : out.toString();
+    }
+
+    private String importResultText(LocalTabStore.ImportResult result) {
+        if (result == null) {
+            return "无结果";
+        }
+        return packageDisplayName(result.sourcePackage)
+                + ": 读取=" + result.seen
+                + " 新增=" + result.inserted
+                + " 更新=" + result.updated
+                + " 跳过=" + result.skipped;
+    }
+
+    private String trimMiddle(String value, int max) {
+        String text = safeText(value, "");
+        if (text.length() <= max || max < 8) {
+            return text;
+        }
+        int keep = (max - 1) / 2;
+        int right = max - 1 - keep;
+        return text.substring(0, keep) + "…" + text.substring(text.length() - right);
+    }
+
+    private String joinLines(List<String> lines) {
+        if (lines == null || lines.isEmpty()) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder();
+        for (String line : lines) {
+            if (line == null || line.length() == 0) {
+                continue;
+            }
+            if (out.length() > 0) {
+                out.append("\n");
+            }
+            out.append(line);
+        }
+        return out.toString();
+    }
+
     private String safeText(String value, String fallback) {
         return value == null || value.trim().length() == 0 ? fallback : value.trim();
     }
 
-    private String formatSize(long size) {
-        if (size < 1024L) return size + " B";
-        if (size < 1024L * 1024L) return (size / 1024L) + " KB";
-        return (size / 1024L / 1024L) + " MB";
+    private String shortError(Object error) {
+        if (error == null) {
+            return "unknown";
+        }
+        String message = error instanceof Throwable
+                ? ((Throwable) error).getMessage()
+                : String.valueOf(error);
+        if (message == null || message.trim().length() == 0) {
+            return error.getClass().getSimpleName();
+        }
+        return message.length() > 140 ? message.substring(0, 140) : message;
     }
 
     private LinearLayout panel() {
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(14), dp(12), dp(14), dp(12));
-        panel.setBackground(panelBackground(8, COLOR_PANEL, COLOR_BORDER));
-        return panel;
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setPadding(dp(14), dp(12), dp(14), dp(12));
+        layout.setBackground(panelBackground(8, COLOR_PANEL, COLOR_BORDER));
+        return layout;
+    }
+
+    private LinearLayout listItemPanel() {
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setPadding(dp(8), dp(6), dp(8), dp(6));
+        layout.setBackground(panelBackground(6, COLOR_PANEL, COLOR_BORDER));
+        return layout;
     }
 
     private LinearLayout horizontalRow() {
@@ -1021,39 +1171,38 @@ public class MainActivity extends Activity {
         return row;
     }
 
-    private LinearLayout.LayoutParams weightParam(float weight, int rightMargin) {
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0,
-                LinearLayout.LayoutParams.WRAP_CONTENT, weight);
-        params.setMargins(0, 0, rightMargin, 0);
-        return params;
+    private void addSectionTitle(LinearLayout parent, String title) {
+        TextView view = textView(15f, COLOR_TEXT, true);
+        view.setText(title);
+        view.setPadding(0, 0, 0, dp(8));
+        parent.addView(view, matchWrap());
     }
 
-    private void addSectionTitle(LinearLayout parent, String title) {
-        TextView text = textView(16f, COLOR_TEXT, true);
-        text.setText(title);
-        text.setPadding(0, 0, 0, dp(8));
-        parent.addView(text, matchWrap());
+    private TextView label(String text) {
+        TextView view = textView(12f, COLOR_MUTED, true);
+        view.setText(text);
+        view.setPadding(0, dp(8), 0, 0);
+        return view;
     }
 
     private TextView textView(float size, int color, boolean bold) {
-        TextView text = new TextView(this);
-        text.setTextSize(size);
-        text.setTextColor(color);
-        text.setLineSpacing(0f, 1.12f);
+        TextView view = new TextView(this);
+        view.setTextSize(size);
+        view.setTextColor(color);
+        view.setLineSpacing(0f, 1.08f);
         if (bold) {
-            text.setTypeface(Typeface.DEFAULT_BOLD);
+            view.setTypeface(Typeface.DEFAULT_BOLD);
         }
-        return text;
+        return view;
     }
 
     private TextView detailText(boolean monospace) {
-        TextView text = textView(13f, COLOR_TEXT, false);
-        text.setTextIsSelectable(true);
+        TextView view = textView(13f, COLOR_TEXT, false);
         if (monospace) {
-            text.setTypeface(Typeface.MONOSPACE);
-            text.setTextSize(12f);
+            view.setTypeface(Typeface.MONOSPACE);
         }
-        return text;
+        view.setTextIsSelectable(true);
+        return view;
     }
 
     private CheckBox switchView(String text) {
@@ -1061,7 +1210,16 @@ public class MainActivity extends Activity {
         box.setText(text);
         box.setTextSize(14f);
         box.setTextColor(COLOR_TEXT);
-        box.setPadding(0, dp(2), 0, dp(2));
+        box.setPadding(0, dp(4), 0, dp(4));
+        return box;
+    }
+
+    private CheckBox compactCheckBox(String text) {
+        CheckBox box = switchView(text);
+        box.setTextSize(13f);
+        box.setPadding(0, 0, 0, 0);
+        box.setSingleLine(true);
+        box.setEllipsize(TextUtils.TruncateAt.END);
         return box;
     }
 
@@ -1072,57 +1230,59 @@ public class MainActivity extends Activity {
         button.setTextSize(14f);
         button.setAllCaps(false);
         button.setBackground(panelBackground(8, color, color));
-        button.setPadding(dp(10), dp(8), dp(10), dp(8));
         button.setOnClickListener(listener);
         return button;
-    }
-
-    private Button smallButton(String text) {
-        return smallButton(text, null);
     }
 
     private Button smallButton(String text, View.OnClickListener listener) {
         Button button = new Button(this);
         button.setText(text);
         button.setTextSize(12f);
-        button.setTextColor(COLOR_PRIMARY);
         button.setAllCaps(false);
+        button.setTextColor(COLOR_TEXT);
+        button.setBackground(panelBackground(6, Color.rgb(248, 250, 252), COLOR_BORDER));
         button.setMinHeight(0);
         button.setMinimumHeight(0);
-        button.setPadding(dp(10), dp(5), dp(10), dp(5));
-        button.setBackground(panelBackground(8, Color.rgb(239, 246, 255), Color.rgb(191, 219, 254)));
-        if (listener != null) {
-            button.setOnClickListener(listener);
-        }
+        button.setMinWidth(0);
+        button.setMinimumWidth(0);
+        button.setPadding(dp(6), dp(2), dp(6), dp(2));
+        button.setIncludeFontPadding(false);
+        button.setGravity(Gravity.CENTER);
+        button.setOnClickListener(listener);
         return button;
     }
 
-    private Button detailButton(String title, View.OnClickListener listener) {
-        return smallButton(title, listener);
-    }
-
-    private void addButtonGrid(LinearLayout parent, Button left, Button right) {
-        LinearLayout row = horizontalRow();
-        row.addView(left, weightParam(1f, dp(8)));
-        row.addView(right, weightParam(1f, 0));
-        parent.addView(row, margin(matchWrap(), 0, 0, 0, dp(8)));
+    private Button listButton(String text, View.OnClickListener listener) {
+        Button button = smallButton(text, listener);
+        button.setTextSize(11f);
+        button.setPadding(dp(4), dp(1), dp(4), dp(1));
+        return button;
     }
 
     private GradientDrawable panelBackground(int radiusDp, int color, int strokeColor) {
-        GradientDrawable drawable = new GradientDrawable();
-        drawable.setColor(color);
-        drawable.setCornerRadius(dp(radiusDp));
-        drawable.setStroke(dp(1), strokeColor);
-        return drawable;
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(color);
+        bg.setCornerRadius(dp(radiusDp));
+        bg.setStroke(dp(1), strokeColor);
+        return bg;
     }
 
     private LinearLayout.LayoutParams matchWrap() {
         return new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
     }
 
-    private LinearLayout.LayoutParams margin(LinearLayout.LayoutParams params, int left, int top, int right, int bottom) {
+    private LinearLayout.LayoutParams margin(LinearLayout.LayoutParams params,
+                                             int left, int top, int right, int bottom) {
         params.setMargins(left, top, right, bottom);
+        return params;
+    }
+
+    private LinearLayout.LayoutParams weightParam(float weight, int rightMargin) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, weight);
+        params.setMargins(0, 0, rightMargin, 0);
         return params;
     }
 
@@ -1132,48 +1292,37 @@ public class MainActivity extends Activity {
 
     private void copyText(String label, String text) {
         ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        if (clipboard == null) {
-            Toast.makeText(this, "复制失败", Toast.LENGTH_SHORT).show();
-            return;
+        if (clipboard != null) {
+            clipboard.setPrimaryClip(ClipData.newPlainText(label, text == null ? "" : text));
+            Toast.makeText(this, "已复制", Toast.LENGTH_SHORT).show();
         }
-        clipboard.setPrimaryClip(ClipData.newPlainText(label, text == null ? "" : text));
-        Toast.makeText(this, label + "已复制", Toast.LENGTH_SHORT).show();
     }
 
-    private static final class ManagerState {
-        boolean asc;
-        String filterMode = FILTER_ALL;
-        String filterNote = "";
+    private static final class TagsState {
+        AlertDialog dialog;
         LinearLayout list;
         TextView summary;
-        Button filterButton;
-        Button sortButton;
-        AlertDialog dialog;
-        final Set<String> selected = new HashSet<String>();
-        final List<AgentStore.ExportGroup> visibleGroups = new ArrayList<AgentStore.ExportGroup>();
+        EditText queryInput;
+        long backupId;
+        String backupName = "";
+        List<ManagedTab> visibleTabs = new ArrayList<ManagedTab>();
+        Set<Long> selected = new HashSet<Long>();
+        String domainFilter = DOMAIN_ALL;
+        String query = "";
+        boolean includeDeleted;
+        int totalTabs;
+        Button loadMoreButton;
+        Button deletedToggleButton;
     }
 
-    private static final class NoteFilterOption {
-        final String mode;
-        final String note;
-        final String label;
-
-        NoteFilterOption(String mode, String note, String label) {
-            this.mode = mode;
-            this.note = note == null ? "" : note;
-            this.label = label == null ? "" : label;
-        }
-
-        boolean matches(String currentMode, String currentNote) {
-            if (!mode.equals(currentMode)) {
-                return false;
-            }
-            if (!FILTER_NOTE.equals(mode)) {
-                return true;
-            }
-            String left = note == null ? "" : note.trim();
-            String right = currentNote == null ? "" : currentNote.trim();
-            return left.equals(right);
-        }
+    private static final class BackupsState {
+        AlertDialog dialog;
+        LinearLayout list;
+        TextView summary;
+        List<ManagedBackup> visibleBackups = new ArrayList<ManagedBackup>();
+        boolean includeDeleted;
+        int totalBackups;
+        Button loadMoreButton;
+        Button deletedToggleButton;
     }
 }

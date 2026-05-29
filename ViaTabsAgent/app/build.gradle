@@ -11,11 +11,10 @@ android {
         applicationId "com.viatabs.agent"
         minSdk 23
         targetSdk 35
-        versionCode 17
-        versionName "0.4.9-lsposed-ui"
+        versionCode 52
+        versionName "0.5.7-pure-app-no-tag-source"
     }
 }
 
 dependencies {
-    compileOnly fileTree(dir: "libs/compile_only", include: ["*.jar"])
 }

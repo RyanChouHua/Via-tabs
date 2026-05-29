@@ -3,7 +3,6 @@
 
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
-
     <queries>
         <package android:name="mark.via" />
         <package android:name="mark.via.gp" />
@@ -21,32 +20,5 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <provider
-            android:name=".ExportProvider"
-            android:authorities="com.viatabs.agent.export"
-            android:exported="true" />
-
-        <receiver
-            android:name=".ExportReceiver"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="com.viatabs.agent.WRITE_FILE" />
-                <action android:name="com.viatabs.agent.APPEND_LOG" />
-            </intent-filter>
-        </receiver>
-
-        <meta-data
-            android:name="xposedmodule"
-            android:value="true" />
-        <meta-data
-            android:name="xposeddescription"
-            android:value="@string/xposed_description" />
-        <meta-data
-            android:name="xposedscope"
-            android:resource="@array/xposed_scope" />
-        <meta-data
-            android:name="xposedminversion"
-            android:value="82" />
     </application>
 </manifest>

@@ -33,6 +33,7 @@ final class AgentStore {
     private static final String KEY_DOMAIN_GROUP_ENABLED = "domain_group_enabled";
     private static final String KEY_PARSE_TARGET = "parse_target";
     private static final String KEY_BOOKMARK_FOLDER_PREFIX = "bookmark_folder_prefix";
+    private static final String KEY_BOOKMARK_NAME_IN_FILE_NAME = "bookmark_name_in_file_name";
     private static final int MAX_LOG_BYTES = 64 * 1024;
 
     private AgentStore() {
@@ -94,6 +95,24 @@ final class AgentStore {
                 .apply();
     }
 
+    static boolean isBookmarkNameInFileNameEnabled(Context context) {
+        if (context == null) {
+            return false;
+        }
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getBoolean(KEY_BOOKMARK_NAME_IN_FILE_NAME, false);
+    }
+
+    static void setBookmarkNameInFileNameEnabled(Context context, boolean enabled) {
+        if (context == null) {
+            return;
+        }
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_BOOKMARK_NAME_IN_FILE_NAME, enabled)
+                .apply();
+    }
+
     private static boolean isSupportedParseTarget(String target) {
         return PARSE_TARGET_ALL.equals(target)
                 || PARSE_TARGET_MARK_VIA.equals(target)
@@ -147,7 +166,11 @@ final class AgentStore {
 
     private static boolean isManagedExportDataName(String fileName) {
         return fileName != null
-                && fileName.startsWith("via-")
+                && fileName.length() > 0
+                && fileName.length() <= 180
+                && !fileName.startsWith(".")
+                && fileName.indexOf('/') < 0
+                && fileName.indexOf('\\') < 0
                 && (fileName.endsWith(".json") || fileName.endsWith(".html"));
     }
 

@@ -186,6 +186,8 @@ public class MainActivity extends Activity {
                 + " / GP版 " + preparedText("mark.via.gp") + "\n"
                 + "解析范围: " + parseTargetLabel(AgentStore.parseTarget(this)) + "（长按解析数据库设置）\n"
                 + "书签文件夹: " + AgentStore.bookmarkFolderPrefix(this) + "-日期-数量\n"
+                + "导出文件名: " + (AgentStore.isBookmarkNameInFileNameEnabled(this)
+                ? "使用书签文件夹名" : "使用默认文件名") + "\n"
                 + "备份: 可用 " + stats.activeBackups + " / 已删 " + stats.deletedBackups
                 + " / 总数 " + stats.backups + "\n"
                 + "标签: 可用 " + stats.active + " / 已删 " + stats.deleted
@@ -553,6 +555,7 @@ public class MainActivity extends Activity {
         final TagsState state = new TagsState();
         state.backupId = backup.id;
         state.backupName = backup.name;
+        state.backupNote = backup.note;
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(10), dp(8), dp(10), dp(8));
@@ -929,7 +932,7 @@ public class MainActivity extends Activity {
             return;
         }
         showExportFolderDialog(tabStore.listTabs(backup.id, SOURCE_ALL, DOMAIN_ALL, "", false),
-                backup.name);
+                backup.name, backup.id, backup.note);
     }
 
     private void exportSelectedHtml(TagsState state) {
@@ -943,24 +946,33 @@ public class MainActivity extends Activity {
                 selected.add(tab);
             }
         }
-        showExportFolderDialog(selected, state.backupName);
+        showExportFolderDialog(selected, state.backupName, state.backupId, state.backupNote);
     }
 
-    private void showExportFolderDialog(final List<ManagedTab> managedTabs, final String sourceName) {
+    private void showExportFolderDialog(final List<ManagedTab> managedTabs, final String sourceName,
+                                        final long backupId, String backupNote) {
         final EditText input = new EditText(this);
         input.setSingleLine(true);
-        input.setText(AgentStore.bookmarkFolderPrefix(this));
+        String defaultName = safeText(backupNote, AgentStore.bookmarkFolderPrefix(this));
+        input.setText(defaultName);
         input.setSelectAllOnFocus(true);
         input.setHint(AgentStore.DEFAULT_BOOKMARK_FOLDER_PREFIX);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(12), dp(6), dp(12), 0);
-        root.addView(label("书签文件夹名前缀"), matchWrap());
+        root.addView(label("书签文件夹名"), matchWrap());
         root.addView(input, matchWrap());
         TextView example = textView(12f, COLOR_MUTED, false);
-        example.setText("例如: 动漫收藏 -> 动漫收藏-日期-数量");
+        example.setText((backupNote == null || backupNote.trim().length() == 0
+                ? "备份没有备注，导出成功后会把这个名称写入备注。"
+                : "已使用备份备注作为默认名称，导出成功后会更新备注。")
+                + "\n例如: 动漫收藏 -> 动漫收藏-日期-数量");
         root.addView(example, margin(matchWrap(), 0, dp(6), 0, 0));
+
+        final CheckBox fileNameSwitch = switchView("文件名也使用书签文件夹名");
+        fileNameSwitch.setChecked(AgentStore.isBookmarkNameInFileNameEnabled(this));
+        root.addView(fileNameSwitch, margin(matchWrap(), 0, dp(6), 0, 0));
 
         new AlertDialog.Builder(this)
                 .setTitle("导出书签")
@@ -971,14 +983,18 @@ public class MainActivity extends Activity {
                     public void onClick(DialogInterface dialog, int which) {
                         String prefix = safeText(input.getText().toString(),
                                 AgentStore.DEFAULT_BOOKMARK_FOLDER_PREFIX);
+                        boolean useFolderNameInFileName = fileNameSwitch.isChecked();
                         AgentStore.setBookmarkFolderPrefix(MainActivity.this, prefix);
-                        exportTabs(managedTabs, sourceName, prefix);
+                        AgentStore.setBookmarkNameInFileNameEnabled(MainActivity.this,
+                                useFolderNameInFileName);
+                        exportTabs(managedTabs, sourceName, prefix, useFolderNameInFileName, backupId);
                     }
                 })
                 .show();
     }
 
-    private void exportTabs(List<ManagedTab> managedTabs, String sourceName, String folderPrefix) {
+    private void exportTabs(List<ManagedTab> managedTabs, String sourceName, String folderPrefix,
+                            boolean useFolderNameInFileName, long backupId) {
         try {
             List<TabRecord> records = toTabRecords(managedTabs);
             if (records.isEmpty()) {
@@ -989,8 +1005,12 @@ public class MainActivity extends Activity {
             BookmarkBatch batch = BookmarkBatches.create(records, groupByDomain, folderPrefix);
             String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US)
                     .format(new java.util.Date());
-            String htmlName = "via-bookmarks-" + stamp + "-" + batch.bookmarkCount + ".html";
-            String jsonName = "via-bookmarks-" + stamp + "-" + batch.bookmarkCount + ".json";
+            String fallbackBaseName = "via-bookmarks-" + stamp + "-" + batch.bookmarkCount;
+            String fileBaseName = useFolderNameInFileName
+                    ? exportFileBaseName(batch.folderName, fallbackBaseName)
+                    : fallbackBaseName;
+            String htmlName = fileBaseName + ".html";
+            String jsonName = fileBaseName + ".json";
             String html = BookmarkHtml.toNetscapeBookmarksHtml(batch, records,
                     new BookmarkHtml.TitleProvider() {
                         @Override
@@ -1000,14 +1020,23 @@ public class MainActivity extends Activity {
             });
             AgentStore.WriteResult htmlResult = AgentStore.writeDownloadFileDetailed(this, htmlName, html);
             AgentStore.WriteResult jsonResult = AgentStore.writeDownloadFileDetailed(this, jsonName,
-                    exportJson(records, groupByDomain, sourceName, batch.folderName));
+                    exportJson(records, groupByDomain, sourceName, batch.folderName,
+                            useFolderNameInFileName));
+            if (backupId > 0) {
+                int changed = tabStore.updateBackupNote(backupId, folderPrefix);
+                AgentStore.appendLog(this, "export folder saved to backup note: backup="
+                        + backupId + " changed=" + changed);
+            }
             AgentStore.appendLog(this, "export bookmarks html: tabs=" + records.size()
                     + " source=" + safeText(sourceName, "local")
                     + " folder=" + batch.folderName
+                    + " fileNameMode=" + (useFolderNameInFileName ? "folder" : "default")
                     + " html=" + htmlResult.summary() + " json=" + jsonResult.summary());
             showTextDialog("导出书签",
                     "来源:\n" + safeText(sourceName, "本地") + "\n\n"
                             + "书签文件夹:\n" + batch.folderName + "\n\n"
+                            + "文件名模式:\n" + (useFolderNameInFileName
+                            ? "使用书签文件夹名" : "使用默认文件名") + "\n\n"
                             + "书签文件:\n" + htmlResult.displayText() + "\n\n"
                             + "备份数据:\n" + jsonResult.displayText() + "\n\n"
                             + "在 Via 书签导入中选择这个书签文件。",
@@ -1039,10 +1068,12 @@ public class MainActivity extends Activity {
     }
 
     private String exportJson(List<TabRecord> records, boolean groupByDomain,
-                              String sourceName, String bookmarkFolder) throws Exception {
+                              String sourceName, String bookmarkFolder,
+                              boolean useFolderNameInFileName) throws Exception {
         JSONObject root = SnapshotJson.base("bookmarks.localExport", safeText(sourceName, "local"));
         root.put("sourceName", safeText(sourceName, "local"));
         root.put("bookmarkFolder", safeText(bookmarkFolder, AgentStore.DEFAULT_BOOKMARK_FOLDER_PREFIX));
+        root.put("useBookmarkFolderInFileName", useFolderNameInFileName);
         root.put("domainGroup", groupByDomain);
         root.put("captured", records.size());
         root.put("bookmarkable", BookmarkBatches.countBookmarkable(records));
@@ -1226,6 +1257,28 @@ public class MainActivity extends Activity {
         return value == null || value.trim().length() == 0 ? fallback : value.trim();
     }
 
+    private String exportFileBaseName(String value, String fallback) {
+        String text = safeText(value, fallback);
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < text.length(); i++) {
+            char ch = text.charAt(i);
+            if (ch == '/' || ch == '\\' || ch == ':' || ch == '*' || ch == '?'
+                    || ch == '"' || ch == '<' || ch == '>' || ch == '|' || Character.isISOControl(ch)) {
+                out.append('_');
+            } else {
+                out.append(ch);
+            }
+        }
+        String clean = out.toString().trim();
+        while (clean.startsWith(".")) {
+            clean = clean.substring(1).trim();
+        }
+        if (clean.length() > 120) {
+            clean = clean.substring(0, 120).trim();
+        }
+        return clean.length() == 0 ? fallback : clean;
+    }
+
     private String shortError(Object error) {
         if (error == null) {
             return "unknown";
@@ -1396,6 +1449,7 @@ public class MainActivity extends Activity {
         EditText queryInput;
         long backupId;
         String backupName = "";
+        String backupNote = "";
         List<ManagedTab> visibleTabs = new ArrayList<ManagedTab>();
         Set<Long> selected = new HashSet<Long>();
         String domainFilter = DOMAIN_ALL;

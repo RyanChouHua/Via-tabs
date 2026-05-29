@@ -43,7 +43,6 @@ public class MainActivity extends Activity {
     private static final int COLOR_PRIMARY = Color.rgb(37, 99, 235);
     private static final int COLOR_PRIMARY_DARK = Color.rgb(30, 64, 175);
     private static final int COLOR_DANGER = Color.rgb(220, 38, 38);
-    private static final int COLOR_SUCCESS = Color.rgb(22, 101, 52);
     private static final String SOURCE_ALL = "";
     private static final String DOMAIN_ALL = "";
     private static final int BACKUP_PAGE_SIZE = 30;
@@ -134,22 +133,24 @@ public class MainActivity extends Activity {
                 savePrepareScript();
             }
         }), matchWrap());
-        panel.addView(actionButton("解析数据库", COLOR_PRIMARY, new View.OnClickListener() {
+        Button parseButton = actionButton("解析数据库", COLOR_PRIMARY, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 parsePreparedDatabases();
             }
-        }), margin(matchWrap(), 0, dp(8), 0, 0));
+        });
+        parseButton.setOnLongClickListener(new View.OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View v) {
+                showParseTargetDialog();
+                return true;
+            }
+        });
+        panel.addView(parseButton, margin(matchWrap(), 0, dp(8), 0, 0));
         panel.addView(actionButton("备份管理", COLOR_PRIMARY, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 showBackupsDialog();
-            }
-        }), margin(matchWrap(), 0, dp(8), 0, 0));
-        panel.addView(actionButton("导出书签", COLOR_SUCCESS, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                exportHtmlFromStore();
             }
         }), margin(matchWrap(), 0, dp(8), 0, 0));
         panel.addView(actionButton("日志", COLOR_PRIMARY_DARK, new View.OnClickListener() {
@@ -183,6 +184,8 @@ public class MainActivity extends Activity {
                 + "   GP版: " + installedText("mark.via.gp") + "\n"
                 + "已提取数据库: 国内版 " + preparedText("mark.via")
                 + " / GP版 " + preparedText("mark.via.gp") + "\n"
+                + "解析范围: " + parseTargetLabel(AgentStore.parseTarget(this)) + "（长按解析数据库设置）\n"
+                + "书签文件夹: " + AgentStore.bookmarkFolderPrefix(this) + "-日期-数量\n"
                 + "备份: 可用 " + stats.activeBackups + " / 已删 " + stats.deletedBackups
                 + " / 总数 " + stats.backups + "\n"
                 + "标签: 可用 " + stats.active + " / 已删 " + stats.deleted
@@ -224,10 +227,44 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void showParseTargetDialog() {
+        final String[] values = new String[]{
+                AgentStore.PARSE_TARGET_ALL,
+                AgentStore.PARSE_TARGET_MARK_VIA,
+                AgentStore.PARSE_TARGET_MARK_VIA_GP
+        };
+        String[] labels = new String[values.length];
+        int checked = 0;
+        String current = AgentStore.parseTarget(this);
+        for (int i = 0; i < values.length; i++) {
+            labels[i] = parseTargetLabel(values[i]);
+            if (values[i].equals(current)) {
+                checked = i;
+            }
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("解析范围")
+                .setSingleChoiceItems(labels, checked, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        String target = values[which];
+                        AgentStore.setParseTarget(MainActivity.this, target);
+                        AgentStore.appendLog(MainActivity.this, "parse target set: " + target);
+                        Toast.makeText(MainActivity.this,
+                                "解析范围: " + parseTargetLabel(target), Toast.LENGTH_SHORT).show();
+                        refreshStatus();
+                        dialog.dismiss();
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
     private void parsePreparedDatabases() {
         final Context appContext = getApplicationContext();
+        final String parseTarget = AgentStore.parseTarget(this);
         Toast.makeText(this, "正在解析数据库", Toast.LENGTH_SHORT).show();
-        AgentStore.appendLog(this, "parse prepared db requested");
+        AgentStore.appendLog(this, "parse prepared db requested: target=" + parseTarget);
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -236,9 +273,10 @@ public class MainActivity extends Activity {
                 final ArrayList<String> errors = new ArrayList<String>();
                 final ArrayList<String> backupSummaries = new ArrayList<String>();
                 try {
-                    List<String> packages = OfflineViaTabsReader.preparedPackages(appContext);
+                    List<String> packages = preparedPackagesForTarget(appContext, parseTarget);
                     if (packages.isEmpty()) {
-                        throw new IllegalStateException("没有已提取数据库，请先运行 prepare-via-all-db.sh");
+                        throw new IllegalStateException("当前解析范围没有已提取数据库: "
+                                + parseTargetLabel(parseTarget) + "。请先运行 prepare-via-all-db.sh");
                     }
                     LocalTabStore store = new LocalTabStore(appContext);
                     try {
@@ -885,21 +923,12 @@ public class MainActivity extends Activity {
                 .show();
     }
 
-    private void exportHtmlFromStore() {
-        ManagedBackup latest = tabStore.latestBackup();
-        if (latest == null) {
-            Toast.makeText(this, "没有可导出的备份", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        exportBackupHtml(latest);
-    }
-
     private void exportBackupHtml(ManagedBackup backup) {
         if (backup == null) {
             Toast.makeText(this, "没有可导出的备份", Toast.LENGTH_SHORT).show();
             return;
         }
-        exportTabs(tabStore.listTabs(backup.id, SOURCE_ALL, DOMAIN_ALL, "", false),
+        showExportFolderDialog(tabStore.listTabs(backup.id, SOURCE_ALL, DOMAIN_ALL, "", false),
                 backup.name);
     }
 
@@ -914,10 +943,42 @@ public class MainActivity extends Activity {
                 selected.add(tab);
             }
         }
-        exportTabs(selected, state.backupName);
+        showExportFolderDialog(selected, state.backupName);
     }
 
-    private void exportTabs(List<ManagedTab> managedTabs, String sourceName) {
+    private void showExportFolderDialog(final List<ManagedTab> managedTabs, final String sourceName) {
+        final EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setText(AgentStore.bookmarkFolderPrefix(this));
+        input.setSelectAllOnFocus(true);
+        input.setHint(AgentStore.DEFAULT_BOOKMARK_FOLDER_PREFIX);
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(12), dp(6), dp(12), 0);
+        root.addView(label("书签文件夹名前缀"), matchWrap());
+        root.addView(input, matchWrap());
+        TextView example = textView(12f, COLOR_MUTED, false);
+        example.setText("例如: 动漫收藏 -> 动漫收藏-日期-数量");
+        root.addView(example, margin(matchWrap(), 0, dp(6), 0, 0));
+
+        new AlertDialog.Builder(this)
+                .setTitle("导出书签")
+                .setView(root)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("导出", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        String prefix = safeText(input.getText().toString(),
+                                AgentStore.DEFAULT_BOOKMARK_FOLDER_PREFIX);
+                        AgentStore.setBookmarkFolderPrefix(MainActivity.this, prefix);
+                        exportTabs(managedTabs, sourceName, prefix);
+                    }
+                })
+                .show();
+    }
+
+    private void exportTabs(List<ManagedTab> managedTabs, String sourceName, String folderPrefix) {
         try {
             List<TabRecord> records = toTabRecords(managedTabs);
             if (records.isEmpty()) {
@@ -925,7 +986,7 @@ public class MainActivity extends Activity {
                 return;
             }
             boolean groupByDomain = AgentStore.isDomainGroupEnabled(this);
-            BookmarkBatch batch = BookmarkBatches.create(records, groupByDomain);
+            BookmarkBatch batch = BookmarkBatches.create(records, groupByDomain, folderPrefix);
             String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US)
                     .format(new java.util.Date());
             String htmlName = "via-bookmarks-" + stamp + "-" + batch.bookmarkCount + ".html";
@@ -936,15 +997,17 @@ public class MainActivity extends Activity {
                         public String titleFor(TabRecord tab) {
                             return OfflineViaTabsReader.displayTitle(tab);
                         }
-                    });
+            });
             AgentStore.WriteResult htmlResult = AgentStore.writeDownloadFileDetailed(this, htmlName, html);
             AgentStore.WriteResult jsonResult = AgentStore.writeDownloadFileDetailed(this, jsonName,
-                    exportJson(records, groupByDomain, sourceName));
+                    exportJson(records, groupByDomain, sourceName, batch.folderName));
             AgentStore.appendLog(this, "export bookmarks html: tabs=" + records.size()
                     + " source=" + safeText(sourceName, "local")
+                    + " folder=" + batch.folderName
                     + " html=" + htmlResult.summary() + " json=" + jsonResult.summary());
             showTextDialog("导出书签",
                     "来源:\n" + safeText(sourceName, "本地") + "\n\n"
+                            + "书签文件夹:\n" + batch.folderName + "\n\n"
                             + "书签文件:\n" + htmlResult.displayText() + "\n\n"
                             + "备份数据:\n" + jsonResult.displayText() + "\n\n"
                             + "在 Via 书签导入中选择这个书签文件。",
@@ -976,9 +1039,10 @@ public class MainActivity extends Activity {
     }
 
     private String exportJson(List<TabRecord> records, boolean groupByDomain,
-                              String sourceName) throws Exception {
+                              String sourceName, String bookmarkFolder) throws Exception {
         JSONObject root = SnapshotJson.base("bookmarks.localExport", safeText(sourceName, "local"));
         root.put("sourceName", safeText(sourceName, "local"));
+        root.put("bookmarkFolder", safeText(bookmarkFolder, AgentStore.DEFAULT_BOOKMARK_FOLDER_PREFIX));
         root.put("domainGroup", groupByDomain);
         root.put("captured", records.size());
         root.put("bookmarkable", BookmarkBatches.countBookmarkable(records));
@@ -1058,6 +1122,33 @@ public class MainActivity extends Activity {
 
     private String preparedText(String packageName) {
         return OfflineViaTabsReader.hasPreparedDatabase(this, packageName) ? "已准备" : "缺失";
+    }
+
+    private List<String> preparedPackagesForTarget(Context context, String target) {
+        ArrayList<String> packages = new ArrayList<String>();
+        if (AgentStore.PARSE_TARGET_MARK_VIA.equals(target)) {
+            if (OfflineViaTabsReader.hasPreparedDatabase(context, AgentStore.PARSE_TARGET_MARK_VIA)) {
+                packages.add(AgentStore.PARSE_TARGET_MARK_VIA);
+            }
+            return packages;
+        }
+        if (AgentStore.PARSE_TARGET_MARK_VIA_GP.equals(target)) {
+            if (OfflineViaTabsReader.hasPreparedDatabase(context, AgentStore.PARSE_TARGET_MARK_VIA_GP)) {
+                packages.add(AgentStore.PARSE_TARGET_MARK_VIA_GP);
+            }
+            return packages;
+        }
+        return OfflineViaTabsReader.preparedPackages(context);
+    }
+
+    private String parseTargetLabel(String target) {
+        if (AgentStore.PARSE_TARGET_MARK_VIA.equals(target)) {
+            return "国内版";
+        }
+        if (AgentStore.PARSE_TARGET_MARK_VIA_GP.equals(target)) {
+            return "GP版";
+        }
+        return "全部";
     }
 
     private String labelOrAll(String value) {

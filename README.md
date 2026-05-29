@@ -31,9 +31,9 @@ sh /storage/emulated/0/Download/ViaTabsAgent/prepare-via-all-db.sh
 /data/user/0/com.viatabs.agent/files/offline-via-tabs/mark_via_gp-via.db
 ```
 
-4. 回到 App，点 `解析数据库`。
+4. 回到 App，点 `解析数据库`。长按 `解析数据库` 可选择解析全部、国内版或 GP 版。
 5. 在 `备份管理` 中按备份批次、国内版/GP 版分开管理标签。
-6. 用 `导出书签` 生成 Via 可手动导入的 Netscape Bookmark HTML。
+6. 在备份管理中导出书签，导出时可设置书签根文件夹名前缀，例如 `动漫收藏-日期-数量`。
 
 ## 功能
 
@@ -42,7 +42,8 @@ sh /storage/emulated/0/Download/ViaTabsAgent/prepare-via-all-db.sh
 - 本地 SQLite 管理备份和标签。
 - 按备份批次、来源版本、域名、搜索词筛选。
 - 支持标题/备注编辑、删除/恢复、永久清理。
-- 支持按域名整理导出书签 HTML。
+- 支持长按解析按钮选择解析国内版、GP 版或全部 prepared DB。
+- 支持按域名整理导出书签 HTML，并在导出时设置书签文件夹名。
 - 日志写入 App 私有文件，并导出到：
 
 ```text
@@ -51,7 +52,14 @@ sh /storage/emulated/0/Download/ViaTabsAgent/prepare-via-all-db.sh
 
 ## 当前版本
 
-当前源码已经提交为 sh-only 基线：
+当前开发版本：
+
+```text
+versionCode 53
+versionName 0.5.8-sh-only
+```
+
+可回退基线：
 
 ```text
 versionCode 52

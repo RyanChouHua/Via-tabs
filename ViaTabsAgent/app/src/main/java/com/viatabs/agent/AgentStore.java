@@ -24,9 +24,15 @@ final class AgentStore {
     static final String DOWNLOAD_DIR = "ViaTabsAgent";
     static final String LOG_FILE = "agent-log.txt";
     static final String PREPARE_ALL_SCRIPT_FILE = "prepare-via-all-db.sh";
+    static final String PARSE_TARGET_ALL = "all";
+    static final String PARSE_TARGET_MARK_VIA = "mark.via";
+    static final String PARSE_TARGET_MARK_VIA_GP = "mark.via.gp";
+    static final String DEFAULT_BOOKMARK_FOLDER_PREFIX = "书签";
 
     private static final String PREFS = "via_tabs_agent";
     private static final String KEY_DOMAIN_GROUP_ENABLED = "domain_group_enabled";
+    private static final String KEY_PARSE_TARGET = "parse_target";
+    private static final String KEY_BOOKMARK_FOLDER_PREFIX = "bookmark_folder_prefix";
     private static final int MAX_LOG_BYTES = 64 * 1024;
 
     private AgentStore() {
@@ -48,6 +54,55 @@ final class AgentStore {
                 .edit()
                 .putBoolean(KEY_DOMAIN_GROUP_ENABLED, enabled)
                 .apply();
+    }
+
+    static String parseTarget(Context context) {
+        if (context == null) {
+            return PARSE_TARGET_ALL;
+        }
+        String value = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString(KEY_PARSE_TARGET, PARSE_TARGET_ALL);
+        return isSupportedParseTarget(value) ? value : PARSE_TARGET_ALL;
+    }
+
+    static void setParseTarget(Context context, String target) {
+        if (context == null) {
+            return;
+        }
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_PARSE_TARGET, isSupportedParseTarget(target) ? target : PARSE_TARGET_ALL)
+                .apply();
+    }
+
+    static String bookmarkFolderPrefix(Context context) {
+        if (context == null) {
+            return DEFAULT_BOOKMARK_FOLDER_PREFIX;
+        }
+        String value = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString(KEY_BOOKMARK_FOLDER_PREFIX, DEFAULT_BOOKMARK_FOLDER_PREFIX);
+        return cleanBookmarkFolderPrefix(value);
+    }
+
+    static void setBookmarkFolderPrefix(Context context, String prefix) {
+        if (context == null) {
+            return;
+        }
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_BOOKMARK_FOLDER_PREFIX, cleanBookmarkFolderPrefix(prefix))
+                .apply();
+    }
+
+    private static boolean isSupportedParseTarget(String target) {
+        return PARSE_TARGET_ALL.equals(target)
+                || PARSE_TARGET_MARK_VIA.equals(target)
+                || PARSE_TARGET_MARK_VIA_GP.equals(target);
+    }
+
+    private static String cleanBookmarkFolderPrefix(String prefix) {
+        String value = prefix == null ? "" : prefix.trim();
+        return value.length() == 0 ? DEFAULT_BOOKMARK_FOLDER_PREFIX : value;
     }
 
     static String writeDownloadFile(Context context, String fileName, String payload) throws Exception {

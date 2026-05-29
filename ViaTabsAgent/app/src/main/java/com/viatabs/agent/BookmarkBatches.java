@@ -16,10 +16,14 @@ final class BookmarkBatches {
     }
 
     static BookmarkBatch create(List<TabRecord> tabs, boolean groupByDomain) {
+        return create(tabs, groupByDomain, DEFAULT_FOLDER_PREFIX);
+    }
+
+    static BookmarkBatch create(List<TabRecord> tabs, boolean groupByDomain, String folderPrefix) {
         long now = System.currentTimeMillis();
         int bookmarkCount = countBookmarkable(tabs);
         String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date(now));
-        return create(DEFAULT_FOLDER_PREFIX + "-" + stamp + "-" + bookmarkCount,
+        return create(cleanName(folderPrefix, DEFAULT_FOLDER_PREFIX) + "-" + stamp + "-" + bookmarkCount,
                 DEFAULT_FILE_PREFIX + "-" + stamp + "-" + bookmarkCount,
                 now / 1000L,
                 tabs,
